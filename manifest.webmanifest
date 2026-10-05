@@ -1,0 +1,14 @@
+{
+  "name": "THE DESK — Zen Go Control",
+  "short_name": "THE DESK",
+  "start_url": "./?v=3",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#16151a",
+  "theme_color": "#201e24",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

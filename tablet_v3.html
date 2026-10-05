@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>THE DESK — Zen Go Control</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#201e24">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root{
     --cream:#ece5d3;--ink:#241f17;--muted:#9a978e;
@@ -205,7 +211,10 @@ const GAIN_RANGE={mic:[0,65],line:[-6,20],hiz:[0,45]};
 function gainToRaw(mode,db){ if(mode==="line"){let v=Math.round(db);if(v<0)v+=256;return clamp(v,0,255);} return clamp(Math.round(db),0,255); }
 function modeKey(s){ return (s||"").toLowerCase().replace("hi-z","hiz"); }
 
-const token=new URLSearchParams(location.search).get("token");
+// Token from URL when present; remembered so the installed home-screen app
+// (which launches without ?token=) can reconnect on its own.
+let token=new URLSearchParams(location.search).get("token");
+try{ if(token) localStorage.setItem("desk_token",token); else token=localStorage.getItem("desk_token"); }catch(e){}
 let ws=null,wsOpen=false;
 function wsSend(o){ if(wsOpen){try{ws.send(JSON.stringify(o));}catch(e){}} }
 function connect(){
@@ -354,6 +363,9 @@ renderMode(1);renderMode(2);renderGain(1);renderGain(2);
 document.querySelectorAll("[data-fader]").forEach(f=>f._place(0));
 setConn(false);connect();
 window.addEventListener("resize",()=>{for(const k in fader){const f=document.querySelector(`[data-fader="${k}"]`);if(f&&f._place)f._place(fader[k].step);}});
+// Register service worker so the page is installable as a home-screen app
+// (works over the USB/localhost connection, which is a secure context).
+if("serviceWorker" in navigator){ navigator.serviceWorker.register("sw.js").catch(()=>{}); }
 </script>
 </body>
 </html>
