@@ -151,6 +151,13 @@ impl ChannelStrip {
     }
 
     // Typed node accessors for telemetry & hotkey adjustments
+    pub fn hpf(&self) -> Option<&BiquadFilter> {
+        self.rack.find_node::<BiquadFilter>()
+    }
+    pub fn hpf_mut(&mut self) -> Option<&mut BiquadFilter> {
+        self.rack.find_node_mut::<BiquadFilter>()
+    }
+
     pub fn gate(&self) -> Option<&NoiseGate> {
         self.rack.find_node::<NoiseGate>()
     }

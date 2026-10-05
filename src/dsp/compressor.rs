@@ -84,6 +84,16 @@ impl VocalCompressor {
         self.recalculate();
     }
 
+    pub fn set_attack_ms(&mut self, ms: f32) {
+        self.attack_ms = ms.clamp(0.1, 500.0);
+        self.recalculate();
+    }
+
+    pub fn set_release_ms(&mut self, ms: f32) {
+        self.release_ms = ms.clamp(5.0, 2000.0);
+        self.recalculate();
+    }
+
     fn recalculate(&mut self) {
         self.attack_coeff = (-1.0 / (self.attack_ms * 0.001 * self.sample_rate)).exp();
         self.release_coeff = (-1.0 / (self.release_ms * 0.001 * self.sample_rate)).exp();

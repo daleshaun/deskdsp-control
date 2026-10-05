@@ -90,8 +90,8 @@ impl AudioMeters {
 }
 
 pub struct AudioEngine {
-    pub input_cmd_producer: rtrb::Producer<AudioCommand>,
-    pub output_cmd_producer: rtrb::Producer<AudioCommand>,
+    pub input_cmd_producer: Option<rtrb::Producer<AudioCommand>>,
+    pub output_cmd_producer: Option<rtrb::Producer<AudioCommand>>,
     pub input_garbage_consumer: rtrb::Consumer<AudioGarbage>,
     pub output_garbage_consumer: rtrb::Consumer<AudioGarbage>,
     pub meters: Arc<AudioMeters>,
@@ -341,8 +341,8 @@ impl AudioEngine {
         out_stream.play()?;
 
         Ok(Self {
-            input_cmd_producer,
-            output_cmd_producer,
+            input_cmd_producer: Some(input_cmd_producer),
+            output_cmd_producer: Some(output_cmd_producer),
             input_garbage_consumer,
             output_garbage_consumer,
             meters,
@@ -356,6 +356,17 @@ impl AudioEngine {
     #[allow(dead_code)]
     pub fn new_default() -> Result<Self> {
         Self::new(None, None)
+    }
+
+    /// Move the SPSC command producers out of the engine once to transfer ownership
+    /// to a dedicated remote command forwarder, preserving the single-producer invariant.
+    pub fn take_command_producers(
+        &mut self,
+    ) -> Option<(rtrb::Producer<AudioCommand>, rtrb::Producer<AudioCommand>)> {
+        match (self.input_cmd_producer.take(), self.output_cmd_producer.take()) {
+            (Some(in_p), Some(out_p)) => Some((in_p, out_p)),
+            _ => None,
+        }
     }
 
     pub fn list_devices() -> Result<()> {
@@ -404,10 +415,18 @@ impl AudioEngine {
             | AudioCommand::SwapStereoRack { target: CommandTarget::Master, .. }
             | AudioCommand::SetParam { target: CommandTarget::Master, .. }
             | AudioCommand::ResetAll { target: CommandTarget::Master, .. } => {
-                self.output_cmd_producer.push(cmd).map_err(|e| match e { rtrb::PushError::Full(c) => c })
+                if let Some(producer) = &mut self.output_cmd_producer {
+                    producer.push(cmd).map_err(|e| match e { rtrb::PushError::Full(c) => c })
+                } else {
+                    Err(cmd)
+                }
             }
             _ => {
-                self.input_cmd_producer.push(cmd).map_err(|e| match e { rtrb::PushError::Full(c) => c })
+                if let Some(producer) = &mut self.input_cmd_producer {
+                    producer.push(cmd).map_err(|e| match e { rtrb::PushError::Full(c) => c })
+                } else {
+                    Err(cmd)
+                }
             }
         }
     }
@@ -532,7 +551,52 @@ pub fn apply_input_command(
                 }
                 "gate_threshold" => {
                     if let Some(gate) = cs.gate_mut() {
-                        gate.threshold_db = value;
+                        gate.threshold_db = value.clamp(-80.0, 0.0);
+                    }
+                }
+                "hpf_freq" => {
+                    if let Some(hpf) = cs.hpf_mut() {
+                        hpf.set_cutoff(value.clamp(20.0, 300.0));
+                    }
+                }
+                "eq_low_gain" => {
+                    if let Some(eq) = cs.eq_mut() {
+                        eq.low_shelf.set_gain_db(value.clamp(-12.0, 12.0));
+                    }
+                }
+                "eq_lmid_gain" => {
+                    if let Some(eq) = cs.eq_mut() {
+                        eq.low_mid.set_gain_db(value.clamp(-12.0, 12.0));
+                    }
+                }
+                "eq_hmid_gain" => {
+                    if let Some(eq) = cs.eq_mut() {
+                        eq.high_mid.set_gain_db(value.clamp(-12.0, 12.0));
+                    }
+                }
+                "eq_hi_gain" => {
+                    if let Some(eq) = cs.eq_mut() {
+                        eq.high_shelf.set_gain_db(value.clamp(-12.0, 12.0));
+                    }
+                }
+                "deess_amount" => {
+                    if let Some(deess) = cs.deesser_mut() {
+                        deess.set_amount(value.clamp(0.0, 12.0));
+                    }
+                }
+                "comp_attack" => {
+                    if let Some(comp) = cs.compressor_mut() {
+                        comp.set_attack_ms(value.clamp(0.1, 100.0));
+                    }
+                }
+                "comp_release" => {
+                    if let Some(comp) = cs.compressor_mut() {
+                        comp.set_release_ms(value.clamp(10.0, 1000.0));
+                    }
+                }
+                "tuner_retune" => {
+                    if let Some(tuner) = cs.tuner_mut() {
+                        tuner.retune_speed_ms = value.clamp(0.1, 200.0);
                     }
                 }
                 _ => {}
@@ -629,7 +693,30 @@ pub fn apply_output_command(
                 }
                 "stereo_width" => {
                     if let Some(w) = master.stereo_width_mut() {
-                        w.width = value;
+                        w.width = value.clamp(0.0, 2.0);
+                    }
+                }
+                "master_eq_low" => {
+                    if let Some(eq) = master.eq_mut() {
+                        let g = value.clamp(-12.0, 12.0);
+                        eq.low_shelf.0.set_gain_db(g);
+                        eq.low_shelf.1.set_gain_db(g);
+                    }
+                }
+                "master_eq_mid" => {
+                    if let Some(eq) = master.eq_mut() {
+                        let g = value.clamp(-12.0, 12.0);
+                        eq.low_mid.0.set_gain_db(g);
+                        eq.low_mid.1.set_gain_db(g);
+                        eq.high_mid.0.set_gain_db(g);
+                        eq.high_mid.1.set_gain_db(g);
+                    }
+                }
+                "master_eq_high" => {
+                    if let Some(eq) = master.eq_mut() {
+                        let g = value.clamp(-12.0, 12.0);
+                        eq.high_shelf.0.set_gain_db(g);
+                        eq.high_shelf.1.set_gain_db(g);
                     }
                 }
                 _ => {}

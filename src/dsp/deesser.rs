@@ -9,6 +9,7 @@ pub struct DeEsser {
     pub threshold_db: f32,
     pub ratio: f32,
     pub frequency: f32,
+    pub amount_db: f32,
     
     sidechain_filter: BiquadFilter,
     envelope: EnvelopeFollower,
@@ -28,6 +29,7 @@ impl DeEsser {
             threshold_db: -20.0,
             ratio: 4.0,
             frequency,
+            amount_db: 4.0,
             sidechain_filter,
             envelope,
             current_attenuation_db: 0.0,
@@ -35,6 +37,11 @@ impl DeEsser {
             current_gain: 1.0,
             bypassed: false,
         }
+    }
+
+    pub fn set_amount(&mut self, amount: f32) {
+        self.amount_db = amount.clamp(0.0, 12.0);
+        self.threshold_db = -10.0 - (self.amount_db * 2.5);
     }
 
     pub fn set_params(&mut self, threshold_db: f32, ratio: f32, frequency: f32) {

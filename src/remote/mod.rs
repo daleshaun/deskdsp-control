@@ -30,7 +30,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::audio::AudioMeters;
+use crate::audio::{AudioCommand, AudioMeters, CommandTarget};
+use crate::dsp::tuner::Scale;
 use crate::hardware::HardwareController;
 use antelope_protocol::PreampMode;
 
@@ -67,6 +68,17 @@ pub enum RemoteMessage {
     SetHp2Volume { step: u8 },
     #[serde(rename = "set_global_bypass")]
     SetGlobalBypass { enabled: bool },
+    #[serde(rename = "set_dsp_param")]
+    SetDspParam {
+        target: String,
+        param: String,
+        value: f32,
+    },
+    #[serde(rename = "set_tuner_scale")]
+    SetTunerScale {
+        target: String,
+        scale: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +105,10 @@ pub struct LiveMetersState {
     pub out_r_dbfs: f32,
     pub comp_gr_db: f32,
     pub lim_gr_db: f32,
+    #[serde(default)]
+    pub integrated_lufs: f32,
+    #[serde(default)]
+    pub true_peak_dbtp: f32,
 }
 
 /// Commands sent to the dedicated coalescing HID worker OS thread
@@ -113,6 +129,7 @@ struct AppState {
     meters: Arc<AudioMeters>,
     global_bypass: Arc<AtomicBool>,
     cmd_tx: std::sync::mpsc::Sender<CoalescedHidCommand>,
+    dsp_cmd_tx: std::sync::mpsc::Sender<AudioCommand>,
     broadcast_tx: broadcast::Sender<String>,
     token: Option<String>,
     broadcast_started: AtomicBool,
@@ -128,10 +145,12 @@ impl TabletRemoteServer {
         hw: Option<HardwareController>,
         meters: Arc<AudioMeters>,
         global_bypass: Arc<AtomicBool>,
+        engine_producers: Option<(rtrb::Producer<AudioCommand>, rtrb::Producer<AudioCommand>)>,
         port: u16,
         token: Option<String>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CoalescedHidCommand>();
+        let (dsp_cmd_tx, dsp_cmd_rx) = std::sync::mpsc::channel::<AudioCommand>();
         let (broadcast_tx, _) = broadcast::channel::<String>(64);
 
         // 1. Dedicated Coalescing HID Worker (Dedicated OS Thread)
@@ -186,11 +205,43 @@ impl TabletRemoteServer {
             })
             .expect("Failed to spawn tablet-hid-writer thread");
 
+        // 2. Dedicated Engine Command Forwarder (Dedicated OS Thread)
+        // Preserves the SPSC single-producer invariant by owning the rtrb command producers.
+        // Drains commands sent from WebSocket handlers and pushes them non-blockingly to the audio engine.
+        if let Some((mut in_prod, mut out_prod)) = engine_producers {
+            std::thread::Builder::new()
+                .name("tablet-dsp-forwarder".into())
+                .spawn(move || {
+                    while let Ok(cmd) = dsp_cmd_rx.recv() {
+                        match cmd {
+                            AudioCommand::SetInputGain { target: CommandTarget::Master, .. }
+                            | AudioCommand::SetOutputGain { target: CommandTarget::Master, .. }
+                            | AudioCommand::SetBypass { target: CommandTarget::Master, .. }
+                            | AudioCommand::ToggleBypass { target: CommandTarget::Master, .. }
+                            | AudioCommand::MoveNode { target: CommandTarget::Master, .. }
+                            | AudioCommand::SwapNodes { target: CommandTarget::Master, .. }
+                            | AudioCommand::InsertStereoNode { target: CommandTarget::Master, .. }
+                            | AudioCommand::RemoveNode { target: CommandTarget::Master, .. }
+                            | AudioCommand::SwapStereoRack { target: CommandTarget::Master, .. }
+                            | AudioCommand::SetParam { target: CommandTarget::Master, .. }
+                            | AudioCommand::ResetAll { target: CommandTarget::Master, .. } => {
+                                let _ = out_prod.push(cmd);
+                            }
+                            _ => {
+                                let _ = in_prod.push(cmd);
+                            }
+                        }
+                    }
+                })
+                .expect("Failed to spawn tablet-dsp-forwarder thread");
+        }
+
         let state = Arc::new(AppState {
             hw,
             meters,
             global_bypass,
             cmd_tx,
+            dsp_cmd_tx,
             broadcast_tx,
             token,
             broadcast_started: AtomicBool::new(false),
@@ -261,6 +312,8 @@ impl TabletRemoteServer {
                 let out_r_dbfs = if out_r > 1e-4 { 20.0 * out_r.log10() } else { -80.0 };
                 let comp_gr_db = AudioMeters::load_f32(&meters_sync.comp_gr_db);
                 let lim_gr_db = AudioMeters::load_f32(&meters_sync.master_limiter_gr_db);
+                let integrated_lufs = AudioMeters::load_f32(&meters_sync.integrated_lufs);
+                let true_peak_dbtp = AudioMeters::load_f32(&meters_sync.master_true_peak_dbtp);
 
                 let msg = RemoteMessage::StateSync {
                     input1,
@@ -273,6 +326,8 @@ impl TabletRemoteServer {
                         out_r_dbfs,
                         comp_gr_db,
                         lim_gr_db,
+                        integrated_lufs,
+                        true_peak_dbtp,
                     },
                     global_bypass: bypass_sync.load(Ordering::Relaxed),
                 };
@@ -519,6 +574,7 @@ async fn meters_handler(
         "comp_gr_db": AudioMeters::load_f32(&state.meters.comp_gr_db),
         "lim_gr_db": AudioMeters::load_f32(&state.meters.master_limiter_gr_db),
         "integrated_lufs": AudioMeters::load_f32(&state.meters.integrated_lufs),
+        "true_peak_dbtp": AudioMeters::load_f32(&state.meters.master_true_peak_dbtp),
         "tuner_freq_hz": AudioMeters::load_f32(&state.meters.tuner_detected_freq)
     }))
     .into_response()
@@ -590,6 +646,61 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             }
                             RemoteMessage::SetGlobalBypass { enabled } => {
                                 state.global_bypass.store(enabled, Ordering::Relaxed);
+                            }
+                            RemoteMessage::SetDspParam { target, param, value } => {
+                                let cmd_target = match target.as_str() {
+                                    "ch1" => CommandTarget::Channel1,
+                                    "ch2" => CommandTarget::Channel2,
+                                    "master" => CommandTarget::Master,
+                                    _ => continue,
+                                };
+                                let param_id: &'static str = match param.as_str() {
+                                    "gate_threshold" => "gate_threshold",
+                                    "comp_threshold" => "comp_threshold",
+                                    "comp_ratio" => "comp_ratio",
+                                    "sat_drive" => "sat_drive",
+                                    "hpf_freq" => "hpf_freq",
+                                    "eq_low_gain" => "eq_low_gain",
+                                    "eq_lmid_gain" => "eq_lmid_gain",
+                                    "eq_hmid_gain" => "eq_hmid_gain",
+                                    "eq_hi_gain" => "eq_hi_gain",
+                                    "deess_amount" => "deess_amount",
+                                    "comp_attack" => "comp_attack",
+                                    "comp_release" => "comp_release",
+                                    "tuner_retune" => "tuner_retune",
+                                    "glue_threshold" => "glue_threshold",
+                                    "stereo_width" => "stereo_width",
+                                    "limiter_ceiling" => "limiter_ceiling",
+                                    "master_eq_low" => "master_eq_low",
+                                    "master_eq_mid" => "master_eq_mid",
+                                    "master_eq_high" => "master_eq_high",
+                                    _ => continue,
+                                };
+                                let _ = state.dsp_cmd_tx.send(AudioCommand::SetParam {
+                                    target: cmd_target,
+                                    param_id,
+                                    value,
+                                });
+                            }
+                            RemoteMessage::SetTunerScale { target, scale } => {
+                                let cmd_target = match target.as_str() {
+                                    "ch1" => CommandTarget::Channel1,
+                                    "ch2" => CommandTarget::Channel2,
+                                    _ => continue,
+                                };
+                                let scale_variant = match scale.as_str() {
+                                    "Chromatic" => Scale::Chromatic,
+                                    "Major" => Scale::Major,
+                                    "NaturalMinor" => Scale::NaturalMinor,
+                                    "HarmonicMinor" => Scale::HarmonicMinor,
+                                    "MajorPentatonic" => Scale::MajorPentatonic,
+                                    "MinorPentatonic" => Scale::MinorPentatonic,
+                                    _ => continue,
+                                };
+                                let _ = state.dsp_cmd_tx.send(AudioCommand::SetTunerScale {
+                                    target: cmd_target,
+                                    scale: scale_variant,
+                                });
                             }
                             _ => {}
                         }

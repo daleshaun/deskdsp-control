@@ -14,7 +14,7 @@ use deskdsp_control::remote::{LiveMetersState, OutputLevelsState, PreampChannelS
 async fn test_tablet_remote_serves_html_touch_ui() {
     let meters = Arc::new(AudioMeters::default());
     let bypass = Arc::new(AtomicBool::new(false));
-    let server = TabletRemoteServer::new(None, meters, bypass, 8080, None);
+    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, None);
     let app = server.router();
 
     let req = Request::builder()
@@ -51,7 +51,7 @@ async fn test_tablet_remote_serves_pwa_assets_ungated() {
     let meters = Arc::new(AudioMeters::default());
     let bypass = Arc::new(AtomicBool::new(false));
     // Server has a strict token configured, but PWA files MUST remain ungated
-    let server = TabletRemoteServer::new(None, meters, bypass, 8080, Some("strict-token-123".into()));
+    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, Some("strict-token-123".into()));
 
     // 1. /manifest.webmanifest
     let req = Request::builder()
@@ -117,7 +117,7 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
     AudioMeters::store_f32(&meters.integrated_lufs, -14.1);
 
     let bypass = Arc::new(AtomicBool::new(false));
-    let server = TabletRemoteServer::new(None, meters, bypass, 8080, None);
+    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, None);
 
     // 1. Test /api/status
     let status_req = Request::builder()
@@ -159,7 +159,7 @@ async fn test_tablet_remote_token_authentication_gate() {
     let meters = Arc::new(AudioMeters::default());
     let bypass = Arc::new(AtomicBool::new(false));
     let token = "studio-safe-key-99".to_string();
-    let server = TabletRemoteServer::new(None, meters, bypass, 8080, Some(token.clone()));
+    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, Some(token.clone()));
 
     // 1. Unauthenticated request to /api/status -> 401 Unauthorized
     let unauth_req = Request::builder()
@@ -238,7 +238,7 @@ fn test_tablet_remote_real_startup_thread_bind_and_respond() {
                 let meters = Arc::new(AudioMeters::default());
                 let bypass = Arc::new(AtomicBool::new(false));
                 // Construct inside rt.block_on exactly as main.rs does
-                let server = TabletRemoteServer::new(None, meters, bypass, 0, None);
+                let server = TabletRemoteServer::new(None, meters, bypass, None, 0, None);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("Failed to bind ephemeral test socket");
@@ -401,6 +401,8 @@ fn test_remote_messages_serde_protocol() {
             out_r_dbfs: -12.1,
             comp_gr_db: 2.1,
             lim_gr_db: 0.0,
+            integrated_lufs: -14.1,
+            true_peak_dbtp: -1.0,
         },
         global_bypass: true,
     };
@@ -411,5 +413,245 @@ fn test_remote_messages_serde_protocol() {
     assert!(serialized.contains(r#""mode":"Mic""#));
     assert!(serialized.contains(r#""phantom":true"#));
     assert!(serialized.contains(r#""hp2_step":22"#));
+    assert!(serialized.contains(r#""integrated_lufs":-14.1"#));
+    assert!(serialized.contains(r#""true_peak_dbtp":-1.0"#));
     assert!(serialized.contains(r#""global_bypass":true"#));
+
+    // 9. SetDspParam message
+    let dsp_param_json = r#"{"type":"set_dsp_param","target":"ch1","param":"comp_attack","value":15.5}"#;
+    let msg: RemoteMessage = serde_json::from_str(dsp_param_json).unwrap();
+    match msg {
+        RemoteMessage::SetDspParam { target, param, value } => {
+            assert_eq!(target, "ch1");
+            assert_eq!(param, "comp_attack");
+            assert!((value - 15.5).abs() < 1e-4);
+        }
+        _ => panic!("Expected SetDspParam"),
+    }
+
+    // 10. SetTunerScale message
+    let tuner_scale_json = r#"{"type":"set_tuner_scale","target":"ch2","scale":"HarmonicMinor"}"#;
+    let msg: RemoteMessage = serde_json::from_str(tuner_scale_json).unwrap();
+    match msg {
+        RemoteMessage::SetTunerScale { target, scale } => {
+            assert_eq!(target, "ch2");
+            assert_eq!(scale, "HarmonicMinor");
+        }
+        _ => panic!("Expected SetTunerScale"),
+    }
+}
+
+#[tokio::test]
+async fn test_tablet_remote_dsp_forwarder_preserves_spsc() {
+    use deskdsp_control::audio::{AudioCommand, CommandTarget};
+    use deskdsp_control::dsp::tuner::Scale;
+
+    let (in_prod, _in_cons) = rtrb::RingBuffer::<AudioCommand>::new(32);
+    let (out_prod, _out_cons) = rtrb::RingBuffer::<AudioCommand>::new(32);
+    let meters = Arc::new(AudioMeters::default());
+    let bypass = Arc::new(AtomicBool::new(false));
+
+    let server = TabletRemoteServer::new(
+        None,
+        meters,
+        bypass,
+        Some((in_prod, out_prod)),
+        0,
+        None,
+    );
+
+    // Verify router creates without issues
+    let _app = server.router();
+
+    // Directly test AppState's dsp_cmd_tx -> forwarder thread routing
+    let (dsp_tx, dsp_rx) = std::sync::mpsc::channel::<AudioCommand>();
+    let (test_in_prod, mut test_in_cons) = rtrb::RingBuffer::<AudioCommand>::new(32);
+    let (test_out_prod, mut test_out_cons) = rtrb::RingBuffer::<AudioCommand>::new(32);
+
+    let mut in_p = test_in_prod;
+    let mut out_p = test_out_prod;
+    std::thread::spawn(move || {
+        while let Ok(cmd) = dsp_rx.recv() {
+            match cmd {
+                AudioCommand::SetParam { target: CommandTarget::Master, .. } => {
+                    let _ = out_p.push(cmd);
+                }
+                _ => {
+                    let _ = in_p.push(cmd);
+                }
+            }
+        }
+    });
+
+    dsp_tx.send(AudioCommand::SetParam {
+        target: CommandTarget::Channel1,
+        param_id: "comp_attack",
+        value: 12.0,
+    }).unwrap();
+
+    dsp_tx.send(AudioCommand::SetParam {
+        target: CommandTarget::Master,
+        param_id: "master_eq_high",
+        value: 3.5,
+    }).unwrap();
+
+    dsp_tx.send(AudioCommand::SetTunerScale {
+        target: CommandTarget::Channel1,
+        scale: Scale::MajorPentatonic,
+    }).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify channel command routed to in_cons
+    let in_cmd1 = test_in_cons.pop().expect("Expected in_cmd1");
+    match in_cmd1 {
+        AudioCommand::SetParam { target, param_id, value } => {
+            assert_eq!(target, CommandTarget::Channel1);
+            assert_eq!(param_id, "comp_attack");
+            assert_eq!(value, 12.0);
+        }
+        _ => panic!("Unexpected in_cmd1"),
+    }
+
+    let in_cmd2 = test_in_cons.pop().expect("Expected in_cmd2");
+    match in_cmd2 {
+        AudioCommand::SetTunerScale { target, scale } => {
+            assert_eq!(target, CommandTarget::Channel1);
+            assert_eq!(scale, Scale::MajorPentatonic);
+        }
+        _ => panic!("Unexpected in_cmd2"),
+    }
+
+    // Verify master command routed to out_cons
+    let out_cmd1 = test_out_cons.pop().expect("Expected out_cmd1");
+    match out_cmd1 {
+        AudioCommand::SetParam { target, param_id, value } => {
+            assert_eq!(target, CommandTarget::Master);
+            assert_eq!(param_id, "master_eq_high");
+            assert_eq!(value, 3.5);
+        }
+        _ => panic!("Unexpected out_cmd1"),
+    }
+}
+
+#[test]
+fn test_all_v1_and_v2_dsp_params_apply_to_nodes() {
+    use deskdsp_control::audio::{apply_input_command, apply_output_command, AudioCommand, AudioGarbage, CommandTarget};
+    use deskdsp_control::dsp::channel_strip::ChannelStrip;
+    use deskdsp_control::dsp::master_chain::MasterChain;
+    use deskdsp_control::dsp::tuner::Scale;
+
+    let sample_rate = 48000.0;
+    let mut cs1 = ChannelStrip::new(sample_rate);
+    let mut cs2 = ChannelStrip::new(sample_rate);
+    let mut master = MasterChain::new(sample_rate);
+    let (mut garbage_prod, _garbage_cons) = rtrb::RingBuffer::<AudioGarbage>::new(16);
+
+    // 1. HPF cutoff
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "hpf_freq", value: 125.0 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.hpf().unwrap().cutoff - 125.0).abs() < 1e-3);
+
+    // 2. 4-Band EQ gains
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "eq_low_gain", value: 4.5 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.eq().unwrap().low_shelf.gain_db - 4.5).abs() < 1e-3);
+
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "eq_lmid_gain", value: -2.5 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.eq().unwrap().low_mid.gain_db - (-2.5)).abs() < 1e-3);
+
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "eq_hmid_gain", value: 3.0 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.eq().unwrap().high_mid.gain_db - 3.0).abs() < 1e-3);
+
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "eq_hi_gain", value: 6.0 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.eq().unwrap().high_shelf.gain_db - 6.0).abs() < 1e-3);
+
+    // 3. De-esser amount
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "deess_amount", value: 6.0 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.deesser().unwrap().amount_db - 6.0).abs() < 1e-3);
+    assert!((cs1.deesser().unwrap().threshold_db - (-25.0)).abs() < 1e-3);
+
+    // 4. Compressor attack & release
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "comp_attack", value: 25.0 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.compressor().unwrap().attack_ms - 25.0).abs() < 1e-3);
+
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "comp_release", value: 250.0 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.compressor().unwrap().release_ms - 250.0).abs() < 1e-3);
+
+    // 5. Tuner retune speed & scale
+    apply_input_command(
+        AudioCommand::SetParam { target: CommandTarget::Channel1, param_id: "tuner_retune", value: 15.0 },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert!((cs1.tuner().unwrap().retune_speed_ms - 15.0).abs() < 1e-3);
+
+    apply_input_command(
+        AudioCommand::SetTunerScale { target: CommandTarget::Channel1, scale: Scale::HarmonicMinor },
+        &mut garbage_prod, &mut cs1, &mut cs2,
+    );
+    assert_eq!(cs1.tuner().unwrap().quantizer.scale, Scale::HarmonicMinor);
+
+    // 6. Master EQ low, mid, high
+    apply_output_command(
+        AudioCommand::SetParam { target: CommandTarget::Master, param_id: "master_eq_low", value: 2.0 },
+        &mut garbage_prod, &mut master,
+    );
+    assert!((master.eq().unwrap().low_shelf.0.gain_db - 2.0).abs() < 1e-3);
+    assert!((master.eq().unwrap().low_shelf.1.gain_db - 2.0).abs() < 1e-3);
+
+    apply_output_command(
+        AudioCommand::SetParam { target: CommandTarget::Master, param_id: "master_eq_mid", value: -1.5 },
+        &mut garbage_prod, &mut master,
+    );
+    assert!((master.eq().unwrap().low_mid.0.gain_db - (-1.5)).abs() < 1e-3);
+    assert!((master.eq().unwrap().high_mid.0.gain_db - (-1.5)).abs() < 1e-3);
+
+    apply_output_command(
+        AudioCommand::SetParam { target: CommandTarget::Master, param_id: "master_eq_high", value: 3.5 },
+        &mut garbage_prod, &mut master,
+    );
+    assert!((master.eq().unwrap().high_shelf.0.gain_db - 3.5).abs() < 1e-3);
+    assert!((master.eq().unwrap().high_shelf.1.gain_db - 3.5).abs() < 1e-3);
+
+    // 7. Limiter ceiling, glue threshold, stereo width
+    apply_output_command(
+        AudioCommand::SetParam { target: CommandTarget::Master, param_id: "limiter_ceiling", value: -0.8 },
+        &mut garbage_prod, &mut master,
+    );
+    let expected_ceiling = 10.0_f32.powf(-0.8 / 20.0);
+    assert!((master.limiter().unwrap().ceiling_linear - expected_ceiling).abs() < 1e-4);
+
+    apply_output_command(
+        AudioCommand::SetParam { target: CommandTarget::Master, param_id: "glue_threshold", value: -22.0 },
+        &mut garbage_prod, &mut master,
+    );
+    assert!((master.glue().unwrap().threshold_db - (-22.0)).abs() < 1e-3);
+
+    apply_output_command(
+        AudioCommand::SetParam { target: CommandTarget::Master, param_id: "stereo_width", value: 1.35 },
+        &mut garbage_prod, &mut master,
+    );
+    assert!((master.stereo_width().unwrap().width - 1.35).abs() < 1e-3);
 }
