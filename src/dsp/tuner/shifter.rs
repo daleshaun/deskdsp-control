@@ -1,4 +1,5 @@
-//! Real-time Monophonic Time-Domain Pitch Shifter (TD-PSOLA / WSOLA delay line).
+//! Real-time Monophonic Time-Domain Pitch Shifter (2-Tap Granular / WSOLA Windowed Delay Line).
+//! Uses dual windowed crossfading taps for low-latency real-time pitch modification.
 
 #[derive(Debug, Clone)]
 pub struct PitchShifter {

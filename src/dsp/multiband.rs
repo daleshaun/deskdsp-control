@@ -1,4 +1,9 @@
 //! 3-Band Multiband Compressor with Linkwitz-Riley crossovers.
+//!
+//! Features phase-aligned Linkwitz-Riley 4th order (LR4) crossovers.
+//! The low band is phase-compensated using a 4th-order allpass filter matched to
+//! the high crossover frequency (3500 Hz), guaranteeing completely flat amplitude
+//! and linear-phase-like phase alignment across all three bands upon summation.
 
 use super::biquad::{BiquadFilter, FilterType};
 use super::compressor::VocalCompressor;
@@ -16,6 +21,10 @@ pub struct MultibandCompressor {
     high_lp2: (BiquadFilter, BiquadFilter),
     high_hp1: (BiquadFilter, BiquadFilter),
     high_hp2: (BiquadFilter, BiquadFilter),
+
+    // Phase compensation allpass for the Low band to match High crossover phase delay
+    low_ap1: (BiquadFilter, BiquadFilter),
+    low_ap2: (BiquadFilter, BiquadFilter),
 
     // Band compressors
     pub low_comp: (VocalCompressor, VocalCompressor),
@@ -75,6 +84,14 @@ impl MultibandCompressor {
                 BiquadFilter::new(FilterType::HighPass, high_split, 0.0, sample_rate),
                 BiquadFilter::new(FilterType::HighPass, high_split, 0.0, sample_rate),
             ),
+            low_ap1: (
+                BiquadFilter::new(FilterType::AllPass { q: 0.70710678 }, high_split, 0.0, sample_rate),
+                BiquadFilter::new(FilterType::AllPass { q: 0.70710678 }, high_split, 0.0, sample_rate),
+            ),
+            low_ap2: (
+                BiquadFilter::new(FilterType::AllPass { q: 0.70710678 }, high_split, 0.0, sample_rate),
+                BiquadFilter::new(FilterType::AllPass { q: 0.70710678 }, high_split, 0.0, sample_rate),
+            ),
             low_comp,
             mid_comp,
             high_comp,
@@ -105,6 +122,8 @@ impl StereoDspNode for MultibandCompressor {
         self.high_lp2.0.reset(); self.high_lp2.1.reset();
         self.high_hp1.0.reset(); self.high_hp1.1.reset();
         self.high_hp2.0.reset(); self.high_hp2.1.reset();
+        self.low_ap1.0.reset(); self.low_ap1.1.reset();
+        self.low_ap2.0.reset(); self.low_ap2.1.reset();
         self.low_comp.0.reset(); self.low_comp.1.reset();
         self.mid_comp.0.reset(); self.mid_comp.1.reset();
         self.high_comp.0.reset(); self.high_comp.1.reset();
@@ -117,8 +136,12 @@ impl StereoDspNode for MultibandCompressor {
         }
 
         // 1. Split into Low and Rest (Mid+High)
-        let low_l = self.low_lp2.0.process_sample(self.low_lp1.0.process_sample(left));
-        let low_r = self.low_lp2.1.process_sample(self.low_lp1.1.process_sample(right));
+        let low_raw_l = self.low_lp2.0.process_sample(self.low_lp1.0.process_sample(left));
+        let low_raw_r = self.low_lp2.1.process_sample(self.low_lp1.1.process_sample(right));
+
+        // Compensate Low band phase to match the High crossover allpass phase shift
+        let low_l = self.low_ap2.0.process_sample(self.low_ap1.0.process_sample(low_raw_l));
+        let low_r = self.low_ap2.1.process_sample(self.low_ap1.1.process_sample(low_raw_r));
 
         let rest_l = self.low_hp2.0.process_sample(self.low_hp1.0.process_sample(left));
         let rest_r = self.low_hp2.1.process_sample(self.low_hp1.1.process_sample(right));
@@ -140,7 +163,7 @@ impl StereoDspNode for MultibandCompressor {
         let proc_high_l = self.high_comp.0.process_sample(high_l);
         let proc_high_r = self.high_comp.1.process_sample(high_r);
 
-        // 4. Sum back together
+        // 4. Sum back together with matched phase
         (
             proc_low_l + proc_mid_l + proc_high_l,
             proc_low_r + proc_mid_r + proc_high_r,

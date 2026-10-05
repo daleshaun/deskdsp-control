@@ -1,28 +1,32 @@
-//! Standard RBJ Audio EQ Cookbook Biquad Filter Implementation.
-//! Implements Direct Form II Transposed structure for numerical stability.
+//! RBJ Audio EQ Cookbook Biquad Filter Implementation.
+//!
+//! Internal state and coefficients use double-precision (f64) for maximum numerical
+//! stability, dynamic range, and prevention of quantization noise / limit cycles at
+//! low frequencies (e.g. 38 Hz high-pass, 80 Hz HPF, and crossover bands).
 
 use super::DspNode;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FilterType {
-    HighPass,
     LowPass,
+    HighPass,
     BandPass { q: f32 },
     Notch { q: f32 },
     Peaking { q: f32 },
     LowShelf { q: f32 },
     HighShelf { q: f32 },
+    AllPass { q: f32 },
 }
 
 #[derive(Debug, Clone)]
 pub struct BiquadFilter {
-    pub b0: f32,
-    pub b1: f32,
-    pub b2: f32,
-    pub a1: f32,
-    pub a2: f32,
-    s1: f32,
-    s2: f32,
+    pub b0: f64,
+    pub b1: f64,
+    pub b2: f64,
+    pub a1: f64,
+    pub a2: f64,
+    s1: f64,
+    s2: f64,
     pub sample_rate: f32,
     pub cutoff: f32,
     pub gain_db: f32,
@@ -60,10 +64,11 @@ impl BiquadFilter {
         if self.bypassed {
             return input;
         }
-        let output = self.b0 * input + self.s1;
-        self.s1 = self.b1 * input - self.a1 * output + self.s2;
-        self.s2 = self.b2 * input - self.a2 * output;
-        output
+        let in_d = input as f64;
+        let out_d = self.b0 * in_d + self.s1;
+        self.s1 = self.b1 * in_d - self.a1 * out_d + self.s2;
+        self.s2 = self.b2 * in_d - self.a2 * out_d;
+        out_d as f32
     }
 
     pub fn set_cutoff(&mut self, cutoff: f32) {
@@ -77,14 +82,14 @@ impl BiquadFilter {
     }
 
     pub fn recalculate(&mut self) {
-        let omega = 2.0 * std::f32::consts::PI * self.cutoff / self.sample_rate;
+        let omega = 2.0 * std::f64::consts::PI * (self.cutoff as f64) / (self.sample_rate as f64);
         let sn = omega.sin();
         let cs = omega.cos();
-        let a = 10.0_f32.powf(self.gain_db / 40.0);
+        let a = 10.0_f64.powf((self.gain_db as f64) / 40.0);
 
         match self.filter_type {
             FilterType::HighPass => {
-                let q = 0.70710678; // Butterworth Q
+                let q = 0.7071067811865475_f64; // Butterworth Q
                 let alpha = sn / (2.0 * q);
                 let a0 = 1.0 + alpha;
                 self.b0 = ((1.0 + cs) / 2.0) / a0;
@@ -94,7 +99,7 @@ impl BiquadFilter {
                 self.a2 = (1.0 - alpha) / a0;
             }
             FilterType::LowPass => {
-                let q = 0.70710678;
+                let q = 0.7071067811865475_f64;
                 let alpha = sn / (2.0 * q);
                 let a0 = 1.0 + alpha;
                 self.b0 = ((1.0 - cs) / 2.0) / a0;
@@ -104,7 +109,7 @@ impl BiquadFilter {
                 self.a2 = (1.0 - alpha) / a0;
             }
             FilterType::BandPass { q } => {
-                let alpha = sn / (2.0 * q.max(0.01));
+                let alpha = sn / (2.0 * (q.max(0.01) as f64));
                 let a0 = 1.0 + alpha;
                 self.b0 = (sn / 2.0) / a0;
                 self.b1 = 0.0;
@@ -113,7 +118,7 @@ impl BiquadFilter {
                 self.a2 = (1.0 - alpha) / a0;
             }
             FilterType::Notch { q } => {
-                let alpha = sn / (2.0 * q.max(0.01));
+                let alpha = sn / (2.0 * (q.max(0.01) as f64));
                 let a0 = 1.0 + alpha;
                 self.b0 = 1.0 / a0;
                 self.b1 = (-2.0 * cs) / a0;
@@ -122,7 +127,7 @@ impl BiquadFilter {
                 self.a2 = (1.0 - alpha) / a0;
             }
             FilterType::Peaking { q } => {
-                let alpha = sn / (2.0 * q.max(0.01));
+                let alpha = sn / (2.0 * (q.max(0.01) as f64));
                 let a0 = 1.0 + alpha / a;
                 self.b0 = (1.0 + alpha * a) / a0;
                 self.b1 = (-2.0 * cs) / a0;
@@ -132,7 +137,7 @@ impl BiquadFilter {
             }
             FilterType::LowShelf { q } => {
                 let beta = (a + 1.0 / a).sqrt();
-                let alpha = sn / 2.0 * beta / q.max(0.01);
+                let alpha = sn / 2.0 * beta / (q.max(0.01) as f64);
                 let ap1 = a + 1.0;
                 let am1 = a - 1.0;
                 let a0 = ap1 + am1 * cs + 2.0 * a.sqrt() * alpha;
@@ -144,7 +149,7 @@ impl BiquadFilter {
             }
             FilterType::HighShelf { q } => {
                 let beta = (a + 1.0 / a).sqrt();
-                let alpha = sn / 2.0 * beta / q.max(0.01);
+                let alpha = sn / 2.0 * beta / (q.max(0.01) as f64);
                 let ap1 = a + 1.0;
                 let am1 = a - 1.0;
                 let a0 = ap1 - am1 * cs + 2.0 * a.sqrt() * alpha;
@@ -153,6 +158,15 @@ impl BiquadFilter {
                 self.b2 = (a * (ap1 + am1 * cs - 2.0 * a.sqrt() * alpha)) / a0;
                 self.a1 = (2.0 * (am1 - ap1 * cs)) / a0;
                 self.a2 = (ap1 - am1 * cs - 2.0 * a.sqrt() * alpha) / a0;
+            }
+            FilterType::AllPass { q } => {
+                let alpha = sn / (2.0 * (q.max(0.01) as f64));
+                let a0 = 1.0 + alpha;
+                self.b0 = (1.0 - alpha) / a0;
+                self.b1 = (-2.0 * cs) / a0;
+                self.b2 = (1.0 + alpha) / a0;
+                self.a1 = (-2.0 * cs) / a0;
+                self.a2 = (1.0 - alpha) / a0;
             }
         }
     }
@@ -168,6 +182,7 @@ impl DspNode for BiquadFilter {
             FilterType::Peaking { .. } => "Peaking EQ Band",
             FilterType::LowShelf { .. } => "Low-Shelf EQ",
             FilterType::HighShelf { .. } => "High-Shelf EQ",
+            FilterType::AllPass { .. } => "All-Pass Filter",
         }
     }
 
@@ -180,18 +195,11 @@ impl DspNode for BiquadFilter {
     }
 
     fn reset(&mut self) {
-        self.s1 = 0.0;
-        self.s2 = 0.0;
+        BiquadFilter::reset(self);
     }
 
     #[inline(always)]
     fn process_sample(&mut self, input: f32) -> f32 {
-        if self.bypassed {
-            return input;
-        }
-        let output = self.b0 * input + self.s1;
-        self.s1 = self.b1 * input - self.a1 * output + self.s2;
-        self.s2 = self.b2 * input - self.a2 * output;
-        output
+        BiquadFilter::process_sample(self, input)
     }
 }
