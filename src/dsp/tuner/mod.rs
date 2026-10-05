@@ -30,6 +30,11 @@ pub struct VocalTuner {
     
     frame_counter: usize,
     hop_size: usize,
+
+    // Confidence gating & clean dry/wet passthrough
+    wet_mix: f32,
+    target_mix: f32,
+    mix_coeff: f32,
 }
 
 impl VocalTuner {
@@ -40,7 +45,7 @@ impl VocalTuner {
             shifter: PitchShifter::new(sample_rate),
             retune_speed_ms: 20.0, // 20 ms natural vocal retune speed
             strength: 0.85,        // 85% correction strength
-            bypassed: false,
+            bypassed: true,        // SAFE DEFAULT: Off until explicitly enabled
             detected_freq_hz: None,
             target_freq_hz: None,
             cents_deviation: 0.0,
@@ -48,6 +53,9 @@ impl VocalTuner {
             confidence: 0.0,
             frame_counter: 0,
             hop_size: 128,         // pitch analysis hop size (~2.6ms at 48kHz)
+            wet_mix: 0.0,
+            target_mix: 0.0,
+            mix_coeff: 1.0 - (-1.0 / (0.010 * sample_rate)).exp(), // ~10ms smooth crossfade
         }
     }
 
@@ -102,7 +110,8 @@ impl DspNode for VocalTuner {
             self.confidence = conf;
 
             if let Some(f_in) = pitch_opt {
-                if conf > 0.65 {
+                // High confidence (>0.78) and signal level required to prevent false triggering on polyphonic music
+                if conf > 0.78 && input.abs() > 0.002 {
                     let (f_target, note_str, cents) = self.quantizer.quantize(f_in);
                     self.detected_freq_hz = Some(f_in);
                     self.target_freq_hz = Some(f_target);
@@ -114,16 +123,26 @@ impl DspNode for VocalTuner {
                     // Blend with strength
                     let effective_ratio = 1.0 + (ideal_ratio - 1.0) * self.strength;
                     self.shifter.set_ratio(effective_ratio, self.retune_speed_ms);
+                    self.target_mix = 1.0;
                 } else {
-                    // Low confidence / unvoiced
-                    self.shifter.set_ratio(1.0, self.retune_speed_ms);
+                    // Low confidence / unvoiced / polyphonic music
+                    self.shifter.set_ratio(1.0, 5.0);
+                    self.target_mix = 0.0;
                 }
             } else {
-                self.shifter.set_ratio(1.0, self.retune_speed_ms);
+                self.shifter.set_ratio(1.0, 5.0);
+                self.target_mix = 0.0;
             }
         }
 
-        self.shifter.process_sample(input)
+        self.wet_mix += (self.target_mix - self.wet_mix) * self.mix_coeff;
+        if self.wet_mix < 0.002 {
+            // Direct, transparent, bit-identical passthrough! Zero delay, zero grain smearing.
+            return input;
+        }
+
+        let wet = self.shifter.process_sample(input);
+        input * (1.0 - self.wet_mix) + wet * self.wet_mix
     }
 
     fn telemetry(&self) -> super::NodeTelemetry {

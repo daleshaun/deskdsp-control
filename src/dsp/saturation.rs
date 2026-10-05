@@ -24,7 +24,7 @@ impl Saturation {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             flavor: SaturationFlavor::Tube,
-            drive: 2.0,
+            drive: 1.0,      // Unity drive default
             asymmetry: 0.15, // Tube warmth with 2nd harmonic
             mix: 1.0,
             dc_blocker: DcBlocker::new(sample_rate),
@@ -76,12 +76,17 @@ impl DspNode for Saturation {
 
     #[inline(always)]
     fn process_sample(&mut self, input: f32) -> f32 {
+        if !input.is_finite() {
+            return 0.0;
+        }
         if self.bypassed || (self.drive <= 1.001 && self.mix <= 0.001) {
             return input;
         }
 
+        let clamped_in = input.clamp(-2.0, 2.0);
+
         // Apply asymmetric drive
-        let driven = (input + self.asymmetry) * self.drive;
+        let driven = (clamped_in + self.asymmetry) * self.drive;
         
         // Soft clipping transfer curve
         let saturated = match self.flavor {
@@ -103,7 +108,8 @@ impl DspNode for Saturation {
         let compensated = dc_cleaned / (1.0 + (self.drive - 1.0) * 0.4);
 
         // Dry/wet mix
-        (1.0 - self.mix) * input + self.mix * compensated
+        let out = (1.0 - self.mix) * clamped_in + self.mix * compensated;
+        out.clamp(-1.5, 1.5)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

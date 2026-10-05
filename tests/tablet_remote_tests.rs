@@ -14,7 +14,8 @@ use deskdsp_control::remote::{LiveMetersState, OutputLevelsState, PreampChannelS
 async fn test_tablet_remote_serves_html_touch_ui() {
     let meters = Arc::new(AudioMeters::default());
     let bypass = Arc::new(AtomicBool::new(false));
-    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, None);
+    let source_mode = Arc::new(AtomicBool::new(true));
+    let server = TabletRemoteServer::new(None, meters, bypass, source_mode, None, 8080, None);
     let app = server.router();
 
     let req = Request::builder()
@@ -50,8 +51,9 @@ async fn test_tablet_remote_serves_html_touch_ui() {
 async fn test_tablet_remote_serves_pwa_assets_ungated() {
     let meters = Arc::new(AudioMeters::default());
     let bypass = Arc::new(AtomicBool::new(false));
+    let source_mode = Arc::new(AtomicBool::new(true));
     // Server has a strict token configured, but PWA files MUST remain ungated
-    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, Some("strict-token-123".into()));
+    let server = TabletRemoteServer::new(None, meters, bypass, source_mode, None, 8080, Some("strict-token-123".into()));
 
     // 1. /manifest.webmanifest
     let req = Request::builder()
@@ -117,7 +119,8 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
     AudioMeters::store_f32(&meters.integrated_lufs, -14.1);
 
     let bypass = Arc::new(AtomicBool::new(false));
-    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, None);
+    let source_mode = Arc::new(AtomicBool::new(true));
+    let server = TabletRemoteServer::new(None, meters, bypass, source_mode, None, 8080, None);
 
     // 1. Test /api/status
     let status_req = Request::builder()
@@ -158,8 +161,9 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
 async fn test_tablet_remote_token_authentication_gate() {
     let meters = Arc::new(AudioMeters::default());
     let bypass = Arc::new(AtomicBool::new(false));
+    let source_mode = Arc::new(AtomicBool::new(true));
     let token = "studio-safe-key-99".to_string();
-    let server = TabletRemoteServer::new(None, meters, bypass, None, 8080, Some(token.clone()));
+    let server = TabletRemoteServer::new(None, meters, bypass, source_mode, None, 8080, Some(token.clone()));
 
     // 1. Unauthenticated request to /api/status -> 401 Unauthorized
     let unauth_req = Request::builder()
@@ -237,8 +241,9 @@ fn test_tablet_remote_real_startup_thread_bind_and_respond() {
             rt.block_on(async move {
                 let meters = Arc::new(AudioMeters::default());
                 let bypass = Arc::new(AtomicBool::new(false));
+                let source_mode = Arc::new(AtomicBool::new(true));
                 // Construct inside rt.block_on exactly as main.rs does
-                let server = TabletRemoteServer::new(None, meters, bypass, None, 0, None);
+                let server = TabletRemoteServer::new(None, meters, bypass, source_mode, None, 0, None);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("Failed to bind ephemeral test socket");
@@ -405,6 +410,7 @@ fn test_remote_messages_serde_protocol() {
             true_peak_dbtp: -1.0,
         },
         global_bypass: true,
+        source_mode: "program".into(),
     };
 
     let serialized = serde_json::to_string(&sync_msg).unwrap();
@@ -416,6 +422,7 @@ fn test_remote_messages_serde_protocol() {
     assert!(serialized.contains(r#""integrated_lufs":-14.1"#));
     assert!(serialized.contains(r#""true_peak_dbtp":-1.0"#));
     assert!(serialized.contains(r#""global_bypass":true"#));
+    assert!(serialized.contains(r#""source_mode":"program""#));
 
     // 9. SetDspParam message
     let dsp_param_json = r#"{"type":"set_dsp_param","target":"ch1","param":"comp_attack","value":15.5}"#;
@@ -439,6 +446,28 @@ fn test_remote_messages_serde_protocol() {
         }
         _ => panic!("Expected SetTunerScale"),
     }
+
+    // 11. SetNodeBypass message
+    let node_bypass_json = r#"{"type":"set_node_bypass","target":"both","node":"tuner","bypassed":false}"#;
+    let msg: RemoteMessage = serde_json::from_str(node_bypass_json).unwrap();
+    match msg {
+        RemoteMessage::SetNodeBypass { target, node, bypassed } => {
+            assert_eq!(target, "both");
+            assert_eq!(node, "tuner");
+            assert!(!bypassed);
+        }
+        _ => panic!("Expected SetNodeBypass"),
+    }
+
+    // 12. SetSourceMode message
+    let source_mode_json = r#"{"type":"set_source_mode","mode":"vocal"}"#;
+    let msg: RemoteMessage = serde_json::from_str(source_mode_json).unwrap();
+    match msg {
+        RemoteMessage::SetSourceMode { mode } => {
+            assert_eq!(mode, "vocal");
+        }
+        _ => panic!("Expected SetSourceMode"),
+    }
 }
 
 #[tokio::test]
@@ -450,11 +479,13 @@ async fn test_tablet_remote_dsp_forwarder_preserves_spsc() {
     let (out_prod, _out_cons) = rtrb::RingBuffer::<AudioCommand>::new(32);
     let meters = Arc::new(AudioMeters::default());
     let bypass = Arc::new(AtomicBool::new(false));
+    let source_mode = Arc::new(AtomicBool::new(true));
 
     let server = TabletRemoteServer::new(
         None,
         meters,
         bypass,
+        source_mode,
         Some((in_prod, out_prod)),
         0,
         None,

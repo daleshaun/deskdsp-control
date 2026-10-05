@@ -20,6 +20,13 @@ use crate::dsp::rack::{MonoRack, StereoRack};
 use crate::dsp::tuner::Scale;
 use crate::dsp::{DspNode, StereoDspNode};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceMode {
+    Program,
+    Vocal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandTarget {
     Channel1,
@@ -33,7 +40,9 @@ pub enum AudioCommand {
     SetOutputGain { target: CommandTarget, gain_db: f32 },
     SetPhaseInvert { target: CommandTarget, invert: bool },
     SetBypass { target: CommandTarget, node_index: usize, bypassed: bool },
+    SetNodeBypass { target: CommandTarget, node_id: &'static str, bypassed: bool },
     ToggleBypass { target: CommandTarget, node_index: usize },
+    SetSourceMode { mode: SourceMode },
     MoveNode { target: CommandTarget, from: usize, to: usize },
     SwapNodes { target: CommandTarget, i: usize, j: usize },
     InsertMonoNode { target: CommandTarget, index: usize, node: Box<dyn DspNode> },
@@ -92,10 +101,12 @@ impl AudioMeters {
 pub struct AudioEngine {
     pub input_cmd_producer: Option<rtrb::Producer<AudioCommand>>,
     pub output_cmd_producer: Option<rtrb::Producer<AudioCommand>>,
+    pub forwarder_cmd_tx: Option<std::sync::mpsc::Sender<AudioCommand>>,
     pub input_garbage_consumer: rtrb::Consumer<AudioGarbage>,
     pub output_garbage_consumer: rtrb::Consumer<AudioGarbage>,
     pub meters: Arc<AudioMeters>,
     pub global_bypass: Arc<AtomicBool>,
+    pub source_mode: Arc<AtomicBool>, // true = Program mode (default, bypasses vocal strips), false = Vocal mode
     _input_stream: Option<Stream>,
     _output_stream: Option<Stream>,
     pub sample_rate: u32,
@@ -187,6 +198,9 @@ impl AudioEngine {
         let sample_rate = in_config.sample_rate().0;
         let meters = Arc::new(AudioMeters::default());
         let global_bypass = Arc::new(AtomicBool::new(false));
+        let in_bypass = Arc::clone(&global_bypass);
+        let source_mode = Arc::new(AtomicBool::new(true)); // DEFAULT TO PROGRAM MODE (skips vocal strip)
+        let in_source_mode = Arc::clone(&source_mode);
 
         // 1. Lock-free SPSC ring buffers between input and output callbacks (8192 frames)
         let (mut ring_l_prod, mut ring_l_cons) = rtrb::RingBuffer::<f32>::new(8192);
@@ -203,7 +217,6 @@ impl AudioEngine {
         // Setup input stream: Audio thread OWNS ChannelStrip 1 & 2
         let in_channels = in_config.channels() as usize;
         let in_meters = Arc::clone(&meters);
-        let in_bypass = Arc::clone(&global_bypass);
         let mut cs1 = ChannelStrip::new(sample_rate as f32);
         let mut cs2 = ChannelStrip::new(sample_rate as f32);
 
@@ -217,6 +230,7 @@ impl AudioEngine {
                     }
 
                     let bypassed = in_bypass.load(Ordering::Relaxed);
+                    let is_program = in_source_mode.load(Ordering::Relaxed);
                     let mut max_l = 0.0_f32;
                     let mut max_r = 0.0_f32;
                     let num_frames = data.len() / in_channels;
@@ -228,8 +242,8 @@ impl AudioEngine {
                         max_l = max_l.max(raw_l.abs());
                         max_r = max_r.max(raw_r.abs());
 
-                        // When globally bypassed, skip processing completely: zero locks, zero allocs!
-                        let (proc_l, proc_r) = if bypassed {
+                        // When globally bypassed or in PROGRAM mode, skip vocal channel strip processing!
+                        let (proc_l, proc_r) = if bypassed || is_program {
                             (raw_l, raw_r)
                         } else {
                             (cs1.process(raw_l), cs2.process(raw_r))
@@ -241,10 +255,12 @@ impl AudioEngine {
                     }
 
                     // Update Channel Strip meters
-                    if bypassed {
+                    if bypassed || is_program {
                         AudioMeters::store_f32(&in_meters.gate_reduction_db, 0.0);
                         AudioMeters::store_f32(&in_meters.deesser_reduction_db, 0.0);
                         AudioMeters::store_f32(&in_meters.comp_gr_db, 0.0);
+                        AudioMeters::store_f32(&in_meters.tuner_detected_freq, 0.0);
+                        AudioMeters::store_f32(&in_meters.tuner_cents, 0.0);
                     } else {
                         if let Some(gate) = cs1.gate() {
                             AudioMeters::store_f32(&in_meters.gate_reduction_db, gate.current_reduction_db());
@@ -343,14 +359,20 @@ impl AudioEngine {
         Ok(Self {
             input_cmd_producer: Some(input_cmd_producer),
             output_cmd_producer: Some(output_cmd_producer),
+            forwarder_cmd_tx: None,
             input_garbage_consumer,
             output_garbage_consumer,
             meters,
             global_bypass,
+            source_mode,
             _input_stream: Some(in_stream),
             _output_stream: Some(out_stream),
             sample_rate,
         })
+    }
+
+    pub fn set_command_sender(&mut self, tx: std::sync::mpsc::Sender<AudioCommand>) {
+        self.forwarder_cmd_tx = Some(tx);
     }
 
     #[allow(dead_code)]
@@ -401,12 +423,19 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Push a command to the audio thread via lock-free SPSC queue.
+    /// Push a command to the audio thread via lock-free SPSC queue or forwarder channel.
     pub fn send_command(&mut self, cmd: AudioCommand) -> Result<(), AudioCommand> {
+        if let AudioCommand::SetSourceMode { mode } = &cmd {
+            self.source_mode.store(*mode == SourceMode::Program, Ordering::Relaxed);
+        }
+        if let Some(tx) = &self.forwarder_cmd_tx {
+            return tx.send(cmd).map_err(|e| e.0);
+        }
         match cmd {
             AudioCommand::SetInputGain { target: CommandTarget::Master, .. }
             | AudioCommand::SetOutputGain { target: CommandTarget::Master, .. }
             | AudioCommand::SetBypass { target: CommandTarget::Master, .. }
+            | AudioCommand::SetNodeBypass { target: CommandTarget::Master, .. }
             | AudioCommand::ToggleBypass { target: CommandTarget::Master, .. }
             | AudioCommand::MoveNode { target: CommandTarget::Master, .. }
             | AudioCommand::SwapNodes { target: CommandTarget::Master, .. }
@@ -470,6 +499,25 @@ pub fn apply_input_command(
         AudioCommand::SetBypass { target, node_index, bypassed } => {
             let cs = if target == CommandTarget::Channel1 { cs1 } else { cs2 };
             cs.rack.set_bypassed(node_index, bypassed);
+        }
+        AudioCommand::SetNodeBypass { target, node_id, bypassed } => {
+            let apply = |cs: &mut ChannelStrip| {
+                match node_id {
+                    "hpf" => { if let Some(n) = cs.hpf_mut() { n.set_bypassed(bypassed); } }
+                    "gate" => { if let Some(n) = cs.gate_mut() { n.set_bypassed(bypassed); } }
+                    "deesser" => { if let Some(n) = cs.deesser_mut() { n.set_bypassed(bypassed); } }
+                    "eq" => { if let Some(n) = cs.eq_mut() { n.set_bypassed(bypassed); } }
+                    "comp" => { if let Some(n) = cs.compressor_mut() { n.set_bypassed(bypassed); } }
+                    "tuner" => { if let Some(n) = cs.tuner_mut() { n.set_bypassed(bypassed); } }
+                    "sat" => { if let Some(n) = cs.saturation_mut() { n.set_bypassed(bypassed); } }
+                    _ => {}
+                }
+            };
+            if target == CommandTarget::Channel1 {
+                apply(cs1);
+            } else if target == CommandTarget::Channel2 {
+                apply(cs2);
+            }
         }
         AudioCommand::ToggleBypass { target, node_index } => {
             let cs = if target == CommandTarget::Channel1 { cs1 } else { cs2 };
@@ -612,6 +660,7 @@ pub fn apply_input_command(
             let cs = if target == CommandTarget::Channel1 { cs1 } else { cs2 };
             cs.reset_all();
         }
+        _ => {}
     }
 }
 
@@ -625,6 +674,16 @@ pub fn apply_output_command(
     match cmd {
         AudioCommand::SetBypass { target: CommandTarget::Master, node_index, bypassed } => {
             master.rack.set_bypassed(node_index, bypassed);
+        }
+        AudioCommand::SetNodeBypass { target: CommandTarget::Master, node_id, bypassed } => {
+            match node_id {
+                "master_eq" | "eq" => { if let Some(n) = master.eq_mut() { n.set_bypassed(bypassed); } }
+                "multiband" => { if let Some(n) = master.multiband_mut() { n.set_bypassed(bypassed); } }
+                "stereo_width" | "width" => { if let Some(n) = master.stereo_width_mut() { n.set_bypassed(bypassed); } }
+                "glue" => { if let Some(n) = master.glue_mut() { n.set_bypassed(bypassed); } }
+                "limiter" => { if let Some(n) = master.limiter_mut() { n.set_bypassed(bypassed); } }
+                _ => {}
+            }
         }
         AudioCommand::ToggleBypass { target: CommandTarget::Master, node_index } => {
             master.rack.toggle_bypass(node_index);

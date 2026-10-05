@@ -171,22 +171,37 @@ fn main() -> Result<()> {
         let hw_remote = hw.clone();
         let meters_remote = Arc::clone(&audio.meters);
         let bypass_remote = Arc::clone(&audio.global_bypass);
+        let source_mode_remote = Arc::clone(&audio.source_mode);
         let engine_producers = audio.take_command_producers();
         let port = args.remote_port;
         let token = args.remote_token.clone();
+        let (tx_forwarder, rx_forwarder) = std::sync::mpsc::channel();
 
         std::thread::Builder::new()
             .name("tablet-remote-server".into())
             .spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to initialize tokio runtime");
                 rt.block_on(async move {
-                    let server = remote::TabletRemoteServer::new(hw_remote, meters_remote, bypass_remote, engine_producers, port, token);
+                    let server = remote::TabletRemoteServer::new(
+                        hw_remote,
+                        meters_remote,
+                        bypass_remote,
+                        source_mode_remote,
+                        engine_producers,
+                        port,
+                        token,
+                    );
+                    let _ = tx_forwarder.send(server.dsp_command_sender());
                     if let Err(e) = server.run().await {
                         eprintln!("Tablet remote server error: {e}");
                     }
                 });
             })
             .expect("Failed to spawn tablet remote thread");
+
+        if let Ok(sender) = rx_forwarder.recv_timeout(std::time::Duration::from_secs(2)) {
+            audio.set_command_sender(sender);
+        }
 
         println!("📡 Wireless Touch Tablet Remote running at: http://0.0.0.0:{}", args.remote_port);
     }

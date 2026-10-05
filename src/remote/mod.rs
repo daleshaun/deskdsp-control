@@ -49,6 +49,8 @@ pub enum RemoteMessage {
         meters: LiveMetersState,
         #[serde(default)]
         global_bypass: bool,
+        #[serde(default)]
+        source_mode: String,
     },
     #[serde(rename = "set_gain")]
     SetGain { input: u8, gain_db: u8 },
@@ -68,6 +70,16 @@ pub enum RemoteMessage {
     SetHp2Volume { step: u8 },
     #[serde(rename = "set_global_bypass")]
     SetGlobalBypass { enabled: bool },
+    #[serde(rename = "set_node_bypass")]
+    SetNodeBypass {
+        target: String,
+        node: String,
+        bypassed: bool,
+    },
+    #[serde(rename = "set_source_mode")]
+    SetSourceMode {
+        mode: String,
+    },
     #[serde(rename = "set_dsp_param")]
     SetDspParam {
         target: String,
@@ -128,6 +140,7 @@ struct AppState {
     hw: Option<HardwareController>,
     meters: Arc<AudioMeters>,
     global_bypass: Arc<AtomicBool>,
+    source_mode: Arc<AtomicBool>,
     cmd_tx: std::sync::mpsc::Sender<CoalescedHidCommand>,
     dsp_cmd_tx: std::sync::mpsc::Sender<AudioCommand>,
     broadcast_tx: broadcast::Sender<String>,
@@ -145,6 +158,7 @@ impl TabletRemoteServer {
         hw: Option<HardwareController>,
         meters: Arc<AudioMeters>,
         global_bypass: Arc<AtomicBool>,
+        source_mode: Arc<AtomicBool>,
         engine_producers: Option<(rtrb::Producer<AudioCommand>, rtrb::Producer<AudioCommand>)>,
         port: u16,
         token: Option<String>,
@@ -217,6 +231,7 @@ impl TabletRemoteServer {
                             AudioCommand::SetInputGain { target: CommandTarget::Master, .. }
                             | AudioCommand::SetOutputGain { target: CommandTarget::Master, .. }
                             | AudioCommand::SetBypass { target: CommandTarget::Master, .. }
+                            | AudioCommand::SetNodeBypass { target: CommandTarget::Master, .. }
                             | AudioCommand::ToggleBypass { target: CommandTarget::Master, .. }
                             | AudioCommand::MoveNode { target: CommandTarget::Master, .. }
                             | AudioCommand::SwapNodes { target: CommandTarget::Master, .. }
@@ -240,6 +255,7 @@ impl TabletRemoteServer {
             hw,
             meters,
             global_bypass,
+            source_mode,
             cmd_tx,
             dsp_cmd_tx,
             broadcast_tx,
@@ -256,6 +272,11 @@ impl TabletRemoteServer {
         Self { port, state }
     }
 
+    /// Expose command sender so AudioEngine / Desktop TUI can route through the lock-free forwarder.
+    pub fn dsp_command_sender(&self) -> std::sync::mpsc::Sender<AudioCommand> {
+        self.state.dsp_cmd_tx.clone()
+    }
+
     fn spawn_broadcast_worker(state: &Arc<AppState>) {
         if state.broadcast_started.swap(true, Ordering::SeqCst) {
             return; // Already started
@@ -265,6 +286,7 @@ impl TabletRemoteServer {
         let meters_sync = Arc::clone(&state.meters);
         let bcast_tx = state.broadcast_tx.clone();
         let bypass_sync = Arc::clone(&state.global_bypass);
+        let source_mode_sync = Arc::clone(&state.source_mode);
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(50)); // 20Hz sync
@@ -330,6 +352,7 @@ impl TabletRemoteServer {
                         true_peak_dbtp,
                     },
                     global_bypass: bypass_sync.load(Ordering::Relaxed),
+                    source_mode: if source_mode_sync.load(Ordering::Relaxed) { "program".into() } else { "vocal".into() },
                 };
 
                 if let Ok(json_str) = serde_json::to_string(&msg) {
@@ -539,7 +562,8 @@ async fn status_handler(
         "sample_rate": 48000,
         "service": "DeskDSP Control Wireless Tablet Remote",
         "token_required": state.token.is_some(),
-        "global_bypass": state.global_bypass.load(Ordering::Relaxed)
+        "global_bypass": state.global_bypass.load(Ordering::Relaxed),
+        "source_mode": if state.source_mode.load(Ordering::Relaxed) { "program" } else { "vocal" }
     }))
     .into_response()
 }
@@ -646,6 +670,63 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             }
                             RemoteMessage::SetGlobalBypass { enabled } => {
                                 state.global_bypass.store(enabled, Ordering::Relaxed);
+                            }
+                            RemoteMessage::SetNodeBypass { target, node, bypassed } => {
+                                let node_id: &'static str = match node.as_str() {
+                                    "hpf" => "hpf",
+                                    "gate" => "gate",
+                                    "deesser" => "deesser",
+                                    "eq" => "eq",
+                                    "comp" => "comp",
+                                    "tuner" => "tuner",
+                                    "sat" => "sat",
+                                    "master_eq" => "master_eq",
+                                    "multiband" => "multiband",
+                                    "stereo_width" | "width" => "stereo_width",
+                                    "glue" => "glue",
+                                    "limiter" => "limiter",
+                                    _ => continue,
+                                };
+                                match target.as_str() {
+                                    "ch1" => {
+                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                                            target: CommandTarget::Channel1,
+                                            node_id,
+                                            bypassed,
+                                        });
+                                    }
+                                    "ch2" => {
+                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                                            target: CommandTarget::Channel2,
+                                            node_id,
+                                            bypassed,
+                                        });
+                                    }
+                                    "both" => {
+                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                                            target: CommandTarget::Channel1,
+                                            node_id,
+                                            bypassed,
+                                        });
+                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                                            target: CommandTarget::Channel2,
+                                            node_id,
+                                            bypassed,
+                                        });
+                                    }
+                                    "master" => {
+                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                                            target: CommandTarget::Master,
+                                            node_id,
+                                            bypassed,
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            RemoteMessage::SetSourceMode { mode } => {
+                                let is_prog = mode.to_lowercase() == "program";
+                                state.source_mode.store(is_prog, Ordering::Relaxed);
                             }
                             RemoteMessage::SetDspParam { target, param, value } => {
                                 let cmd_target = match target.as_str() {

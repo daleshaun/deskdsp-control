@@ -99,14 +99,34 @@ pub struct ChannelStrip {
 impl ChannelStrip {
     pub fn new(sample_rate: f32) -> Self {
         let mut rack = MonoRack::with_capacity(16);
-        // Default ordered tracking chain
-        rack.push(BiquadFilter::new(FilterType::HighPass, 80.0, 0.0, sample_rate)); // 0: HPF 80Hz
-        rack.push(NoiseGate::new(sample_rate));                                     // 1: Noise Gate
-        rack.push(DeEsser::new(sample_rate));                                       // 2: De-Esser
-        rack.push(ParametricEq4Band::new(sample_rate));                             // 3: 4-Band EQ
-        rack.push(VocalCompressor::new(sample_rate));                               // 4: Compressor
-        rack.push(VocalTuner::new(sample_rate));                                    // 5: Vocal Tuner
-        rack.push(Saturation::new(sample_rate));                                    // 6: Saturation
+        // Default ordered tracking chain - safe defaults:
+        // High-pass, Gate, De-Esser, Comp, Tuner, and Saturation are bypassed by default
+        // so music and program material pass bit-identically clean until explicitly activated.
+        let mut hpf = BiquadFilter::new(FilterType::HighPass, 20.0, 0.0, sample_rate);
+        hpf.bypassed = true;
+        rack.push(hpf); // 0: HPF (20Hz safe sub-audio cutoff)
+
+        let mut gate = NoiseGate::new(sample_rate);
+        gate.bypassed = true;
+        rack.push(gate); // 1: Noise Gate
+
+        let mut deesser = DeEsser::new(sample_rate);
+        deesser.bypassed = true;
+        rack.push(deesser); // 2: De-Esser
+
+        rack.push(ParametricEq4Band::new(sample_rate)); // 3: 4-Band EQ (flat 0dB)
+
+        let mut comp = VocalCompressor::new(sample_rate);
+        comp.bypassed = true;
+        rack.push(comp); // 4: Compressor
+
+        let mut tuner = VocalTuner::new(sample_rate);
+        tuner.bypassed = true;
+        rack.push(tuner); // 5: Vocal Tuner
+
+        let mut sat = Saturation::new(sample_rate);
+        sat.bypassed = true;
+        rack.push(sat); // 6: Saturation
 
         Self {
             rack,

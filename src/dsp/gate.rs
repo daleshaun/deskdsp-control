@@ -33,7 +33,7 @@ impl NoiseGate {
             hold_counter: 0,
             current_gain: 1.0,
             gain_coeff: 0.0,
-            bypassed: false,
+            bypassed: true, // SAFE DEFAULT: Off until explicitly enabled
             sample_rate,
         };
         gate.recalculate();
