@@ -188,6 +188,7 @@
   <div class="top">
     <div class="brand">THE <span>DESK</span><small>ZEN GO · CONTROL</small></div>
     <div style="display:flex;align-items:center;gap:12px">
+      <span class="bg" id="fs" style="min-width:auto;padding:10px 13px" title="Fullscreen">⛶</span>
       <span class="bg" id="bypass" style="min-width:128px;padding:10px 16px">DSP · ACTIVE</span>
       <div class="conn off" id="conn"><span class="dot"></span><span id="connTxt">OFFLINE</span></div>
     </div>
@@ -396,6 +397,16 @@ const bypassBtn=document.getElementById("bypass");
 function renderBypass(){bypassBtn.classList.toggle("byp",dspBypassed);bypassBtn.classList.toggle("active",!dspBypassed);bypassBtn.textContent=dspBypassed?"DSP · BYPASS":"DSP · ACTIVE";}
 bypassBtn.addEventListener("click",()=>{dspBypassed=!dspBypassed;renderBypass();wsSend({type:"set_global_bypass",enabled:dspBypassed});});
 renderBypass();
+// Fullscreen toggle (covers the browser tab; the installed PWA is already fullscreen)
+const fsBtn=document.getElementById("fs");
+function updateFs(){ fsBtn.classList.toggle("active", !!document.fullscreenElement); }
+fsBtn.addEventListener("click",()=>{
+  const d=document.documentElement;
+  if(!document.fullscreenElement){ (d.requestFullscreen||d.webkitRequestFullscreen||(()=>Promise.reject())).call(d).catch(()=>{}); }
+  else { (document.exitFullscreen||document.webkitExitFullscreen||(()=>{})).call(document); }
+});
+document.addEventListener("fullscreenchange",updateFs);
+updateFs();
 
 function setConn(ok){const c=document.getElementById("conn"),t=document.getElementById("connTxt");c.classList.toggle("ok",ok);c.classList.toggle("off",!ok);t.textContent=ok?"ONLINE":"OFFLINE";}
 function onMsg(s){if(s.type!=="state_sync")return;
