@@ -388,4 +388,93 @@ fn test_master_chain_rack_operations_and_typed_downcast() {
     assert_eq!(r_out, r_in);
 }
 
+#[test]
+fn test_harmonic_exciter_bypass_and_spectral_coloration() {
+    use deskdsp_control::dsp::exciter::{HarmonicExciter, ExciterFlavor};
+    use deskdsp_control::dsp::DspNode;
+
+    let sample_rate = 48000.0_f32;
+    let mut exciter = HarmonicExciter::new(sample_rate);
+
+    // 1. Bit-identical bypass
+    exciter.set_bypassed(true);
+    let samples = [0.123_f32, -0.456, 0.789, 0.0, -0.99];
+    for &s in &samples {
+        assert_eq!(exciter.process_sample(s), s, "Bypassed exciter must be bit-identical");
+    }
+
+    // 2. Harmonic generation on high-frequency tone
+    exciter.set_bypassed(false);
+    exciter.set_flavor(ExciterFlavor::Tube);
+    exciter.set_params(3000.0, 3.0, 0.5); // HPF @ 3kHz, 3x drive, 50% blend
+
+    let f0 = 4000.0_f32; // 4 kHz fundamental
+    let num_samples = 4800; // 100ms
+    let mut output_signal = Vec::with_capacity(num_samples);
+
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate;
+        let s = (2.0 * std::f32::consts::PI * f0 * t).sin() * 0.5;
+        output_signal.push(exciter.process_sample(s));
+    }
+
+    // Measure power at fundamental (4 kHz) vs 2nd harmonic (8 kHz) via quadrature correlation
+    let mut fund_sin = 0.0_f32;
+    let mut fund_cos = 0.0_f32;
+    let mut harm2_sin = 0.0_f32;
+    let mut harm2_cos = 0.0_f32;
+
+    for (i, &s) in output_signal.iter().enumerate() {
+        let t = i as f32 / sample_rate;
+        fund_sin += s * (2.0 * std::f32::consts::PI * f0 * t).sin();
+        fund_cos += s * (2.0 * std::f32::consts::PI * f0 * t).cos();
+        harm2_sin += s * (2.0 * std::f32::consts::PI * (2.0 * f0) * t).sin();
+        harm2_cos += s * (2.0 * std::f32::consts::PI * (2.0 * f0) * t).cos();
+    }
+
+    let fund_mag = (fund_sin * fund_sin + fund_cos * fund_cos).sqrt();
+    let harm2_mag = (harm2_sin * harm2_sin + harm2_cos * harm2_cos).sqrt();
+    let h2_ratio = harm2_mag / fund_mag;
+    assert!(h2_ratio > 0.01, "Harmonic exciter must generate measurable 2nd harmonic overtones (got ratio {})", h2_ratio);
+
+    // 3. Low-frequency immunity: a 200 Hz tone is below 3 kHz HPF sidechain, so it receives virtually 0 excitation
+    let mut low_exciter = HarmonicExciter::new(sample_rate);
+    low_exciter.set_params(4000.0, 3.0, 0.5);
+    let low_f0 = 200.0_f32;
+    let mut low_diff_energy = 0.0_f32;
+    let mut low_fund_energy = 0.0_f32;
+
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate;
+        let raw = (2.0 * std::f32::consts::PI * low_f0 * t).sin() * 0.5;
+        let proc = low_exciter.process_sample(raw);
+        low_fund_energy += raw * raw;
+        low_diff_energy += (proc - raw) * (proc - raw);
+    }
+
+    let low_diff_ratio = (low_diff_energy / low_fund_energy).sqrt();
+    assert!(low_diff_ratio < 0.02, "Bass frequencies below exciter HPF must pass through clean without harmonic distortion");
+}
+
+#[test]
+fn test_harmonic_exciter_rack_integration() {
+    use deskdsp_control::dsp::rack::MonoRack;
+    use deskdsp_control::dsp::exciter::HarmonicExciter;
+
+    let sample_rate = 48000.0_f32;
+    let mut rack = MonoRack::with_capacity(8);
+    rack.push(HarmonicExciter::new(sample_rate));
+
+    assert_eq!(rack.len(), 1);
+    assert_eq!(rack.get(0).unwrap().name(), "Harmonic Exciter");
+
+    // Safe typed downcast
+    assert!(rack.find_node::<HarmonicExciter>().is_some());
+    assert!(rack.find_node_mut::<HarmonicExciter>().is_some());
+
+    let out = rack.process(0.3);
+    assert!(!out.is_nan() && out != 0.0);
+}
+
+
 

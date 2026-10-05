@@ -21,6 +21,7 @@ pub mod glue_compressor;
 pub mod limiter;
 pub mod lufs_meter;
 pub mod rack;
+pub mod exciter;
 pub mod channel_strip;
 pub mod master_chain;
 
