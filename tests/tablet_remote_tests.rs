@@ -27,16 +27,18 @@ async fn test_tablet_remote_serves_html_touch_ui() {
     let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
     let html = String::from_utf8(body_bytes.to_vec()).unwrap();
 
-    // Verify key touch elements and styles are present
-    assert!(html.contains("DeskDSP Remote"));
-    assert!(html.contains("Zen Go Synergy Core"));
-    assert!(html.contains("ch1Fader"));
-    assert!(html.contains("ch2Fader"));
-    assert!(html.contains("monFader"));
-    assert!(html.contains("hp1Fader"));
-    assert!(html.contains("hp2Fader"));
-    assert!(html.contains("ch1PhantomBtn"));
-    assert!(html.contains("monitorMuteBtn"));
+    // Verify key touch elements and styles from tablet_v2.html are present
+    assert!(html.contains("THE"));
+    assert!(html.contains("DESK"));
+    assert!(html.contains("ZEN GO · CONTROL"));
+    assert!(html.contains("PROGRAM · LIVE"));
+    assert!(html.contains("data-knob=\"1\""));
+    assert!(html.contains("data-knob=\"2\""));
+    assert!(html.contains("data-fader=\"mon\""));
+    assert!(html.contains("data-fader=\"hp1\""));
+    assert!(html.contains("data-fader=\"hp2\""));
+    assert!(html.contains("data-tog=\"48v\""));
+    assert!(html.contains("data-tog=\"mute\""));
     assert!(html.contains("pointerdown"));
 }
 
@@ -212,8 +214,9 @@ fn test_tablet_remote_real_startup_thread_bind_and_respond() {
     let mut html_response = String::new();
     stream_html.read_to_string(&mut html_response).unwrap();
     assert!(html_response.starts_with("HTTP/1.1 200 OK"));
-    assert!(html_response.contains("DeskDSP Remote"));
-    assert!(html_response.contains("ch1Fader"));
+    assert!(html_response.contains("THE"));
+    assert!(html_response.contains("DESK"));
+    assert!(html_response.contains("PROGRAM · LIVE"));
 
     // Cleanup: thread terminates with test completion
     drop(thread_handle);
