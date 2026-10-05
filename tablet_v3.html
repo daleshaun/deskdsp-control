@@ -179,6 +179,10 @@
     background:linear-gradient(180deg,#09080b,#15141a);box-shadow:0 0 0 1px #000, inset 0 0 8px #000;}
   .grled>i{display:block;height:100%;width:0%;background:linear-gradient(270deg,#ef5c48,#e6ad4a 60%,#55a56c);transition:width .07s linear}
   .grlab{font-size:8px;color:var(--muted);letter-spacing:1.5px;font-weight:800;margin-bottom:4px}
+  .lblright{display:flex;align-items:center;gap:8px}
+  .nbyp{cursor:pointer;font-size:8.5px;font-weight:800;letter-spacing:1px;padding:4px 9px;border-radius:5px;
+    background:#1b1a1f;color:#8f8e86;border:1px solid #55535c;box-shadow:inset 0 1px 1px rgba(0,0,0,.5)}
+  .nbyp.inon{background:linear-gradient(180deg,#52b06e,#2f7d49);color:#08140c;border-color:#1f5531;box-shadow:0 0 8px rgba(79,165,108,.5)}
   svg{display:block}
 </style>
 </head>
@@ -189,6 +193,7 @@
     <div class="brand">THE <span>DESK</span><small>ZEN GO · CONTROL</small></div>
     <div style="display:flex;align-items:center;gap:12px">
       <span class="bg" id="fs" style="min-width:auto;padding:10px 13px" title="Fullscreen">⛶</span>
+      <span class="bg" id="srcmode" style="min-width:104px;padding:10px 14px" title="Program routes to the master chain; Vocal engages the channel strip">PROGRAM</span>
       <span class="bg" id="bypass" style="min-width:128px;padding:10px 16px">DSP · ACTIVE</span>
       <div class="conn off" id="conn"><span class="dot"></span><span id="connTxt">OFFLINE</span></div>
     </div>
@@ -256,35 +261,35 @@
       <span class="bg" data-selch="ch2">CH 2 · GTR</span>
     </div>
     <div class="prow">
-      <div class="panel fx"><div class="lbl"><span>NOISE GATE</span><span class="tiny">MODEL&nbsp;G</span></div><div class="in" style="min-height:188px"><div class="fxrow">
+      <div class="panel fx" data-node="gate" data-mtarget="both"><div class="lbl"><span>NOISE GATE</span><span class="lblright"><span class="tiny">MODEL&nbsp;G</span><span class="nbyp">BYP</span></span></div><div class="in" style="min-height:188px"><div class="fxrow">
         <div class="dctl" data-dsp='{"group":"chsel","param":"gate_threshold","min":-80,"max":0,"unit":"dB"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">THRESH</div></div>
       </div></div></div>
-      <div class="panel fx face-cream"><div class="lbl lblc"><span>OPTO LEVELER</span><span class="tiny">T·DESK</span></div><div class="in">
+      <div class="panel fx face-cream" data-node="comp" data-mtarget="both"><div class="lbl lblc"><span>OPTO LEVELER</span><span class="lblright"><span class="tiny">T·DESK</span><span class="nbyp">BYP</span></span></div><div class="in">
         <div class="vu" data-vu="comp"></div>
         <div class="fxrow">
         <div class="dctl" data-dsp='{"group":"chsel","param":"comp_threshold","min":-40,"max":0,"unit":"dB"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">PEAK&nbsp;RED</div></div>
         <div class="dctl" data-dsp='{"group":"chsel","param":"comp_ratio","min":1,"max":20,"unit":":1"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">RATIO</div></div>
       </div></div></div>
-      <div class="panel fx face-warm"><div class="lbl lblw"><span>TUBE DRIVE</span><span class="tiny">VALVE</span></div><div class="in">
+      <div class="panel fx face-warm" data-node="sat" data-mtarget="both"><div class="lbl lblw"><span>TUBE DRIVE</span><span class="lblright"><span class="tiny">VALVE</span><span class="nbyp">BYP</span></span></div><div class="in">
         <div class="tube"></div>
         <div class="fxrow">
         <div class="dctl" data-dsp='{"group":"chsel","param":"sat_drive","min":1,"max":5,"unit":"x"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">DRIVE</div></div>
       </div></div></div>
-      <div class="panel fx"><div class="lbl"><span>PITCH</span><span class="tiny">AUTO</span></div><div class="in" style="justify-content:center;gap:10px;min-height:188px">
+      <div class="panel fx" data-node="tuner" data-mtarget="both"><div class="lbl"><span>PITCH</span><span class="lblright"><span class="tiny">AUTO</span><span class="nbyp">BYP</span></span></div><div class="in" style="justify-content:center;gap:10px;min-height:188px">
         <div class="btns"><span class="bg on" data-scale="Chromatic">CHROM</span></div>
         <div class="btns"><span class="bg" data-scale="Major">MAJOR</span><span class="bg" data-scale="NaturalMinor">MINOR</span></div>
       </div></div>
     </div>
     <div class="prow">
-      <div class="panel fx face-blue"><div class="lbl lblb"><span>BUS GLUE</span><span class="tiny">STEREO</span></div><div class="in">
+      <div class="panel fx face-blue" data-node="glue" data-mtarget="master"><div class="lbl lblb"><span>BUS GLUE</span><span class="lblright"><span class="tiny">STEREO</span><span class="nbyp">BYP</span></span></div><div class="in">
         <div class="vu" data-vu="glue"></div>
         <div class="fxrow">
         <div class="dctl" data-dsp='{"group":"master","param":"glue_threshold","min":-40,"max":0,"unit":"dB"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">THRESH</div></div>
       </div></div></div>
-      <div class="panel fx"><div class="lbl"><span>STEREO FIELD</span><span class="tiny">M/S</span></div><div class="in" style="min-height:206px"><div class="fxrow">
+      <div class="panel fx" data-node="stereo_width" data-mtarget="master"><div class="lbl"><span>STEREO FIELD</span><span class="lblright"><span class="tiny">M/S</span><span class="nbyp">BYP</span></span></div><div class="in" style="min-height:206px"><div class="fxrow">
         <div class="dctl" data-dsp='{"group":"master","param":"stereo_width","min":0,"max":2,"unit":"x"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">WIDTH</div></div>
       </div></div></div>
-      <div class="panel fx"><div class="lbl"><span>BRICKWALL</span><span class="tiny">TP</span></div><div class="in" style="min-height:206px">
+      <div class="panel fx" data-node="limiter" data-mtarget="master"><div class="lbl"><span>BRICKWALL</span><span class="lblright"><span class="tiny">TP</span><span class="nbyp">BYP</span></span></div><div class="in" style="min-height:206px">
         <div class="grled"><i data-grled="lim"></i></div><div class="grlab">GAIN REDUCTION</div>
         <div class="fxrow">
         <div class="dctl" data-dsp='{"group":"master","param":"limiter_ceiling","min":-12,"max":0,"unit":"dBTP"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">CEILING</div></div>
@@ -411,6 +416,7 @@ updateFs();
 function setConn(ok){const c=document.getElementById("conn"),t=document.getElementById("connTxt");c.classList.toggle("ok",ok);c.classList.toggle("off",!ok);t.textContent=ok?"ONLINE":"OFFLINE";}
 function onMsg(s){if(s.type!=="state_sync")return;
   if(typeof s.global_bypass==="boolean"){dspBypassed=s.global_bypass;renderBypass();}
+  if(typeof s.source_mode==="string" && s.source_mode!==srcMode){srcMode=s.source_mode;renderSrc();}
   applyChan(1,s.input1);applyChan(2,s.input2);
   if(s.outputs){applyFader("mon",s.outputs.monitor_step);applyFader("hp1",s.outputs.hp1_step);applyFader("hp2",s.outputs.hp2_step);
     const mt=document.getElementById("muteTag"),mb=document.querySelector('[data-tog="mute"]');
@@ -501,6 +507,21 @@ function buildVU(c){
 function setVU(vu,grDb){const gr=clamp(grDb,0,20);const ang=30-(gr/20)*82;vu.nd.setAttribute("transform",`rotate(${ang} ${vu.cx} ${vu.cy})`);}
 const vus={};
 document.querySelectorAll("[data-vu]").forEach(c=>{vus[c.dataset.vu]=buildVU(c);setVU(vus[c.dataset.vu],0);});
+
+// ----- Source mode (PROGRAM = master chain only / VOCAL = engage channel strip) -----
+let srcMode="program";
+const srcBtn=document.getElementById("srcmode");
+function renderSrc(){srcBtn.classList.toggle("active",srcMode==="program");srcBtn.classList.toggle("byp",srcMode==="vocal");srcBtn.textContent=srcMode==="program"?"PROGRAM":"VOCAL";}
+srcBtn.addEventListener("click",()=>{srcMode=srcMode==="program"?"vocal":"program";renderSrc();wsSend({type:"set_source_mode",mode:srcMode});});
+renderSrc();
+// ----- Per-effect bypass (IN / BYP per unit) -----
+const nbyp={gate:true,comp:true,sat:true,tuner:true,glue:false,stereo_width:false,limiter:false};
+document.querySelectorAll("[data-node]").forEach(p=>{
+  const node=p.dataset.node, mtarget=p.dataset.mtarget, btn=p.querySelector(".nbyp");
+  function render(){const b=!!nbyp[node];btn.classList.toggle("inon",!b);btn.textContent=b?"BYP":"IN";}
+  btn.addEventListener("click",(e)=>{e.stopPropagation();nbyp[node]=!nbyp[node];render();wsSend({type:"set_node_bypass",target:mtarget,node:node,bypassed:nbyp[node]});});
+  render();
+});
 
 setConn(false);connect();
 window.addEventListener("resize",()=>{for(const k in fader){const f=document.querySelector(`[data-fader="${k}"]`);if(f&&f._place)f._place(fader[k].step);}});
