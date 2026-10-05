@@ -46,6 +46,8 @@ pub enum RemoteMessage {
         input2: PreampChannelState,
         outputs: OutputLevelsState,
         meters: LiveMetersState,
+        #[serde(default)]
+        global_bypass: bool,
     },
     #[serde(rename = "set_gain")]
     SetGain { input: u8, gain_db: u8 },
@@ -63,6 +65,8 @@ pub enum RemoteMessage {
     SetHp1Volume { step: u8 },
     #[serde(rename = "set_hp2_volume")]
     SetHp2Volume { step: u8 },
+    #[serde(rename = "set_global_bypass")]
+    SetGlobalBypass { enabled: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +111,7 @@ enum CoalescedHidCommand {
 struct AppState {
     hw: Option<HardwareController>,
     meters: Arc<AudioMeters>,
+    global_bypass: Arc<AtomicBool>,
     cmd_tx: std::sync::mpsc::Sender<CoalescedHidCommand>,
     broadcast_tx: broadcast::Sender<String>,
     token: Option<String>,
@@ -122,6 +127,7 @@ impl TabletRemoteServer {
     pub fn new(
         hw: Option<HardwareController>,
         meters: Arc<AudioMeters>,
+        global_bypass: Arc<AtomicBool>,
         port: u16,
         token: Option<String>,
     ) -> Self {
@@ -183,6 +189,7 @@ impl TabletRemoteServer {
         let state = Arc::new(AppState {
             hw,
             meters,
+            global_bypass,
             cmd_tx,
             broadcast_tx,
             token,
@@ -206,6 +213,7 @@ impl TabletRemoteServer {
         let hw_sync = state.hw.clone();
         let meters_sync = Arc::clone(&state.meters);
         let bcast_tx = state.broadcast_tx.clone();
+        let bypass_sync = Arc::clone(&state.global_bypass);
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(50)); // 20Hz sync
@@ -266,6 +274,7 @@ impl TabletRemoteServer {
                         comp_gr_db,
                         lim_gr_db,
                     },
+                    global_bypass: bypass_sync.load(Ordering::Relaxed),
                 };
 
                 if let Ok(json_str) = serde_json::to_string(&msg) {
@@ -454,7 +463,8 @@ async fn status_handler(
         "hardware_detected": hw_online,
         "sample_rate": 48000,
         "service": "DeskDSP Control Wireless Tablet Remote",
-        "token_required": state.token.is_some()
+        "token_required": state.token.is_some(),
+        "global_bypass": state.global_bypass.load(Ordering::Relaxed)
     }))
     .into_response()
 }
@@ -557,6 +567,9 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             }
                             RemoteMessage::SetHp2Volume { step } => {
                                 let _ = state.cmd_tx.send(CoalescedHidCommand::Hp2Vol { val: step });
+                            }
+                            RemoteMessage::SetGlobalBypass { enabled } => {
+                                state.global_bypass.store(enabled, Ordering::Relaxed);
                             }
                             _ => {}
                         }

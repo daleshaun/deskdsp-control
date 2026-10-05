@@ -52,6 +52,14 @@ struct Args {
     /// Optional access security token for the wireless tablet remote
     #[arg(long)]
     remote_token: Option<String>,
+
+    /// Audio input device name (e.g. "BlackHole 2ch", "Zen Go")
+    #[arg(long)]
+    input_device: Option<String>,
+
+    /// Audio output device name (e.g. "Zen Go", "BlackHole 2ch")
+    #[arg(long)]
+    output_device: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -126,7 +134,7 @@ fn main() -> Result<()> {
     }
 
     println!("Initializing Real-Time Audio Engine (cpal: CoreAudio / ALSA)...");
-    let audio = AudioEngine::new()?;
+    let audio = AudioEngine::new(args.input_device.clone(), args.output_device.clone())?;
     println!("✓ Audio Engine running at {} Hz.", audio.sample_rate);
 
     if let Some(secs) = args.test_audio {
@@ -154,6 +162,7 @@ fn main() -> Result<()> {
     if args.remote || args.remote_only {
         let hw_remote = hw.clone();
         let meters_remote = Arc::clone(&audio.meters);
+        let bypass_remote = Arc::clone(&audio.global_bypass);
         let port = args.remote_port;
         let token = args.remote_token.clone();
 
@@ -162,7 +171,7 @@ fn main() -> Result<()> {
             .spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to initialize tokio runtime");
                 rt.block_on(async move {
-                    let server = remote::TabletRemoteServer::new(hw_remote, meters_remote, port, token);
+                    let server = remote::TabletRemoteServer::new(hw_remote, meters_remote, bypass_remote, port, token);
                     if let Err(e) = server.run().await {
                         eprintln!("Tablet remote server error: {e}");
                     }

@@ -421,3 +421,96 @@ fn test_rack_insert_at_capacity_boundary_zero_allocations_and_safe_garbage_retur
         "Overflow node must be dropped only after cleanup thread drain"
     );
 }
+
+#[test]
+fn test_global_bypass_bit_identical_clean_passthrough() {
+    let mut cs1 = ChannelStrip::new(48000.0);
+    let mut cs2 = ChannelStrip::new(48000.0);
+    let mut master = MasterChain::new(48000.0);
+
+    // Set aggressive processing so normal path modifies audio significantly
+    cs1.input_gain_db = 12.0;
+    cs2.input_gain_db = 12.0;
+
+    let bypass = Arc::new(AtomicBool::new(true));
+
+    let test_samples: [f32; 8] = [
+        0.0,
+        0.1234567,
+        -0.4567891,
+        0.7777777,
+        -0.8888888,
+        0.0001234,
+        -0.0009876,
+        0.9999999,
+    ];
+
+    // 1. In bypassed state inside assert_no_alloc, verify bit-identical passthrough and zero allocs
+    assert_no_alloc(|| {
+        for &s in &test_samples {
+            let bypassed = bypass.load(Ordering::Relaxed);
+            let (out_l, out_r) = if bypassed {
+                (s, s)
+            } else {
+                (cs1.process(s), cs2.process(s))
+            };
+
+            assert_eq!(
+                s.to_bits(),
+                out_l.to_bits(),
+                "ChannelStrip L sample must be bit-identical in bypass mode"
+            );
+            assert_eq!(
+                s.to_bits(),
+                out_r.to_bits(),
+                "ChannelStrip R sample must be bit-identical in bypass mode"
+            );
+
+            let (master_l, master_r) = if bypassed {
+                (out_l, out_r)
+            } else {
+                master.process_stereo(out_l, out_r)
+            };
+
+            assert_eq!(
+                s.to_bits(),
+                master_l.to_bits(),
+                "Master Chain L sample must be bit-identical in bypass mode"
+            );
+            assert_eq!(
+                s.to_bits(),
+                master_r.to_bits(),
+                "Master Chain R sample must be bit-identical in bypass mode"
+            );
+        }
+    });
+
+    // 2. Disable bypass: verify active processing alters audio
+    bypass.store(false, Ordering::Relaxed);
+    let mut altered = false;
+    for &s in &test_samples {
+        let bypassed = bypass.load(Ordering::Relaxed);
+        let (out_l, _) = if bypassed {
+            (s, s)
+        } else {
+            (cs1.process(s), cs2.process(s))
+        };
+        if s.to_bits() != out_l.to_bits() {
+            altered = true;
+        }
+    }
+    assert!(altered, "Active DSP processing must alter the audio signal");
+
+    // 3. Re-enable bypass: verify immediate return to bit-identical passthrough
+    bypass.store(true, Ordering::Relaxed);
+    for &s in &test_samples {
+        let bypassed = bypass.load(Ordering::Relaxed);
+        let (out_l, out_r) = if bypassed {
+            (s, s)
+        } else {
+            (cs1.process(s), cs2.process(s))
+        };
+        assert_eq!(s.to_bits(), out_l.to_bits());
+        assert_eq!(s.to_bits(), out_r.to_bits());
+    }
+}

@@ -8,7 +8,7 @@
 //! 4. Lock-free SPSC audio ring buffer (`rtrb`) between input and output streams.
 //! 5. Lock-free atomic meters read/write without contention.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -95,36 +95,76 @@ pub struct AudioEngine {
     pub input_garbage_consumer: rtrb::Consumer<AudioGarbage>,
     pub output_garbage_consumer: rtrb::Consumer<AudioGarbage>,
     pub meters: Arc<AudioMeters>,
+    pub global_bypass: Arc<AtomicBool>,
     _input_stream: Option<Stream>,
     _output_stream: Option<Stream>,
     pub sample_rate: u32,
 }
 
 impl AudioEngine {
-    pub fn new() -> Result<Self> {
+    pub fn new(input_device_name: Option<String>, output_device_name: Option<String>) -> Result<Self> {
         let host = cpal::default_host();
         
-        // Locate Zen Go devices
         let mut in_dev: Option<Device> = None;
         let mut out_dev: Option<Device> = None;
 
+        // 1. Locate Input Device: prioritize CLI match, then Zen Go, then default
         if let Ok(devices) = host.input_devices() {
-            for d in devices {
-                if let Ok(name) = d.name() {
-                    if name.contains("Zen Go") {
-                        in_dev = Some(d);
-                        break;
+            let devs: Vec<_> = devices.collect();
+            if let Some(target) = &input_device_name {
+                let target_lower = target.to_lowercase();
+                for d in &devs {
+                    if let Ok(name) = d.name() {
+                        if name.to_lowercase().contains(&target_lower) {
+                            println!("✓ Selected requested audio input device: '{name}'");
+                            in_dev = Some(d.clone());
+                            break;
+                        }
+                    }
+                }
+                if in_dev.is_none() {
+                    eprintln!("Notice: Requested input device '{target}' not found. Falling back to Zen Go / default...");
+                }
+            }
+            if in_dev.is_none() {
+                for d in &devs {
+                    if let Ok(name) = d.name() {
+                        if name.contains("Zen Go") {
+                            println!("✓ Detected Zen Go input device: '{name}'");
+                            in_dev = Some(d.clone());
+                            break;
+                        }
                     }
                 }
             }
         }
 
+        // 2. Locate Output Device: prioritize CLI match, then Zen Go, then default
         if let Ok(devices) = host.output_devices() {
-            for d in devices {
-                if let Ok(name) = d.name() {
-                    if name.contains("Zen Go") {
-                        out_dev = Some(d);
-                        break;
+            let devs: Vec<_> = devices.collect();
+            if let Some(target) = &output_device_name {
+                let target_lower = target.to_lowercase();
+                for d in &devs {
+                    if let Ok(name) = d.name() {
+                        if name.to_lowercase().contains(&target_lower) {
+                            println!("✓ Selected requested audio output device: '{name}'");
+                            out_dev = Some(d.clone());
+                            break;
+                        }
+                    }
+                }
+                if out_dev.is_none() {
+                    eprintln!("Notice: Requested output device '{target}' not found. Falling back to Zen Go / default...");
+                }
+            }
+            if out_dev.is_none() {
+                for d in &devs {
+                    if let Ok(name) = d.name() {
+                        if name.contains("Zen Go") {
+                            println!("✓ Detected Zen Go output device: '{name}'");
+                            out_dev = Some(d.clone());
+                            break;
+                        }
                     }
                 }
             }
@@ -134,11 +174,19 @@ impl AudioEngine {
         let in_dev = in_dev.or_else(|| host.default_input_device()).ok_or_else(|| anyhow!("No audio input device available"))?;
         let out_dev = out_dev.or_else(|| host.default_output_device()).ok_or_else(|| anyhow!("No audio output device available"))?;
 
+        if let Ok(name) = in_dev.name() {
+            println!("🎤 Audio Input Device: {name}");
+        }
+        if let Ok(name) = out_dev.name() {
+            println!("🔊 Audio Output Device: {name}");
+        }
+
         let in_config = in_dev.default_input_config()?;
         let out_config = out_dev.default_output_config()?;
 
         let sample_rate = in_config.sample_rate().0;
         let meters = Arc::new(AudioMeters::default());
+        let global_bypass = Arc::new(AtomicBool::new(false));
 
         // 1. Lock-free SPSC ring buffers between input and output callbacks (8192 frames)
         let (mut ring_l_prod, mut ring_l_cons) = rtrb::RingBuffer::<f32>::new(8192);
@@ -155,6 +203,7 @@ impl AudioEngine {
         // Setup input stream: Audio thread OWNS ChannelStrip 1 & 2
         let in_channels = in_config.channels() as usize;
         let in_meters = Arc::clone(&meters);
+        let in_bypass = Arc::clone(&global_bypass);
         let mut cs1 = ChannelStrip::new(sample_rate as f32);
         let mut cs2 = ChannelStrip::new(sample_rate as f32);
 
@@ -167,6 +216,7 @@ impl AudioEngine {
                         apply_input_command(cmd, &mut in_garbage_producer, &mut cs1, &mut cs2);
                     }
 
+                    let bypassed = in_bypass.load(Ordering::Relaxed);
                     let mut max_l = 0.0_f32;
                     let mut max_r = 0.0_f32;
                     let num_frames = data.len() / in_channels;
@@ -178,28 +228,37 @@ impl AudioEngine {
                         max_l = max_l.max(raw_l.abs());
                         max_r = max_r.max(raw_r.abs());
 
-                        // Process through owned channel strips
-                        let proc_l = cs1.process(raw_l);
-                        let proc_r = cs2.process(raw_r);
+                        // When globally bypassed, skip processing completely: zero locks, zero allocs!
+                        let (proc_l, proc_r) = if bypassed {
+                            (raw_l, raw_r)
+                        } else {
+                            (cs1.process(raw_l), cs2.process(raw_r))
+                        };
 
                         // Push to lock-free SPSC ring buffers
                         let _ = ring_l_prod.push(proc_l);
                         let _ = ring_r_prod.push(proc_r);
                     }
 
-                    // Update Channel Strip meters from CS1
-                    if let Some(gate) = cs1.gate() {
-                        AudioMeters::store_f32(&in_meters.gate_reduction_db, gate.current_reduction_db());
-                    }
-                    if let Some(deesser) = cs1.deesser() {
-                        AudioMeters::store_f32(&in_meters.deesser_reduction_db, deesser.gain_reduction_db());
-                    }
-                    if let Some(comp) = cs1.compressor() {
-                        AudioMeters::store_f32(&in_meters.comp_gr_db, comp.gain_reduction_db());
-                    }
-                    if let Some(tuner) = cs1.tuner() {
-                        AudioMeters::store_f32(&in_meters.tuner_detected_freq, tuner.detected_freq_hz.unwrap_or(0.0));
-                        AudioMeters::store_f32(&in_meters.tuner_cents, tuner.cents_deviation);
+                    // Update Channel Strip meters
+                    if bypassed {
+                        AudioMeters::store_f32(&in_meters.gate_reduction_db, 0.0);
+                        AudioMeters::store_f32(&in_meters.deesser_reduction_db, 0.0);
+                        AudioMeters::store_f32(&in_meters.comp_gr_db, 0.0);
+                    } else {
+                        if let Some(gate) = cs1.gate() {
+                            AudioMeters::store_f32(&in_meters.gate_reduction_db, gate.current_reduction_db());
+                        }
+                        if let Some(deesser) = cs1.deesser() {
+                            AudioMeters::store_f32(&in_meters.deesser_reduction_db, deesser.gain_reduction_db());
+                        }
+                        if let Some(comp) = cs1.compressor() {
+                            AudioMeters::store_f32(&in_meters.comp_gr_db, comp.gain_reduction_db());
+                        }
+                        if let Some(tuner) = cs1.tuner() {
+                            AudioMeters::store_f32(&in_meters.tuner_detected_freq, tuner.detected_freq_hz.unwrap_or(0.0));
+                            AudioMeters::store_f32(&in_meters.tuner_cents, tuner.cents_deviation);
+                        }
                     }
 
                     AudioMeters::store_f32(&in_meters.in_l_peak, max_l);
@@ -214,6 +273,7 @@ impl AudioEngine {
         // Setup output stream: Audio thread OWNS MasterChain
         let out_channels = out_config.channels() as usize;
         let out_meters = Arc::clone(&meters);
+        let out_bypass = Arc::clone(&global_bypass);
         let mut master = MasterChain::new(sample_rate as f32);
 
         let out_stream = match out_config.sample_format() {
@@ -225,6 +285,7 @@ impl AudioEngine {
                         apply_output_command(cmd, &mut out_garbage_producer, &mut master);
                     }
 
+                    let bypassed = out_bypass.load(Ordering::Relaxed);
                     let num_frames = data.len() / out_channels;
                     let mut max_l = 0.0_f32;
                     let mut max_r = 0.0_f32;
@@ -233,8 +294,12 @@ impl AudioEngine {
                         let in_l = ring_l_cons.pop().unwrap_or(0.0);
                         let in_r = ring_r_cons.pop().unwrap_or(0.0);
 
-                        // Process stereo through owned Master Chain!
-                        let (out_l, out_r) = master.process_stereo(in_l, in_r);
+                        // When globally bypassed, pass clean bit-identical (in_l, in_r) straight through!
+                        let (out_l, out_r) = if bypassed {
+                            (in_l, in_r)
+                        } else {
+                            master.process_stereo(in_l, in_r)
+                        };
 
                         max_l = max_l.max(out_l.abs());
                         max_r = max_r.max(out_r.abs());
@@ -249,14 +314,18 @@ impl AudioEngine {
                     }
 
                     // Telemetry for Master Chain
-                    if let Some(limiter) = master.limiter() {
-                        AudioMeters::store_f32(&out_meters.master_limiter_gr_db, limiter.gain_reduction_db());
-                    }
-                    if let Some(meter) = master.meter() {
-                        AudioMeters::store_f32(&out_meters.master_true_peak_dbtp, meter.max_true_peak_dbtp);
-                        AudioMeters::store_f32(&out_meters.momentary_lufs, meter.momentary_lufs);
-                        AudioMeters::store_f32(&out_meters.short_term_lufs, meter.short_term_lufs);
-                        AudioMeters::store_f32(&out_meters.integrated_lufs, meter.integrated_lufs);
+                    if bypassed {
+                        AudioMeters::store_f32(&out_meters.master_limiter_gr_db, 0.0);
+                    } else {
+                        if let Some(limiter) = master.limiter() {
+                            AudioMeters::store_f32(&out_meters.master_limiter_gr_db, limiter.gain_reduction_db());
+                        }
+                        if let Some(meter) = master.meter() {
+                            AudioMeters::store_f32(&out_meters.master_true_peak_dbtp, meter.max_true_peak_dbtp);
+                            AudioMeters::store_f32(&out_meters.momentary_lufs, meter.momentary_lufs);
+                            AudioMeters::store_f32(&out_meters.short_term_lufs, meter.short_term_lufs);
+                            AudioMeters::store_f32(&out_meters.integrated_lufs, meter.integrated_lufs);
+                        }
                     }
 
                     AudioMeters::store_f32(&out_meters.out_l_peak, max_l);
@@ -277,10 +346,16 @@ impl AudioEngine {
             input_garbage_consumer,
             output_garbage_consumer,
             meters,
+            global_bypass,
             _input_stream: Some(in_stream),
             _output_stream: Some(out_stream),
             sample_rate,
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn new_default() -> Result<Self> {
+        Self::new(None, None)
     }
 
     /// Push a command to the audio thread via lock-free SPSC queue.

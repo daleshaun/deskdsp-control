@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use axum::body::Body;
@@ -12,7 +13,8 @@ use deskdsp_control::remote::{LiveMetersState, OutputLevelsState, PreampChannelS
 #[tokio::test]
 async fn test_tablet_remote_serves_html_touch_ui() {
     let meters = Arc::new(AudioMeters::default());
-    let server = TabletRemoteServer::new(None, meters, 8080, None);
+    let bypass = Arc::new(AtomicBool::new(false));
+    let server = TabletRemoteServer::new(None, meters, bypass, 8080, None);
     let app = server.router();
 
     let req = Request::builder()
@@ -52,7 +54,8 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
     AudioMeters::store_f32(&meters.master_limiter_gr_db, 1.2);
     AudioMeters::store_f32(&meters.integrated_lufs, -14.1);
 
-    let server = TabletRemoteServer::new(None, meters, 8080, None);
+    let bypass = Arc::new(AtomicBool::new(false));
+    let server = TabletRemoteServer::new(None, meters, bypass, 8080, None);
 
     // 1. Test /api/status
     let status_req = Request::builder()
@@ -68,6 +71,7 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
     let status_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(status_json["status"], "online");
     assert_eq!(status_json["sample_rate"], 48000);
+    assert_eq!(status_json["global_bypass"], false);
 
     // 2. Test /api/meters
     let meters_req = Request::builder()
@@ -91,8 +95,9 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
 #[tokio::test]
 async fn test_tablet_remote_token_authentication_gate() {
     let meters = Arc::new(AudioMeters::default());
+    let bypass = Arc::new(AtomicBool::new(false));
     let token = "studio-safe-key-99".to_string();
-    let server = TabletRemoteServer::new(None, meters, 8080, Some(token.clone()));
+    let server = TabletRemoteServer::new(None, meters, bypass, 8080, Some(token.clone()));
 
     // 1. Unauthenticated request to /api/status -> 401 Unauthorized
     let unauth_req = Request::builder()
@@ -169,8 +174,9 @@ fn test_tablet_remote_real_startup_thread_bind_and_respond() {
             let rt = tokio::runtime::Runtime::new().expect("Failed to initialize tokio runtime");
             rt.block_on(async move {
                 let meters = Arc::new(AudioMeters::default());
+                let bypass = Arc::new(AtomicBool::new(false));
                 // Construct inside rt.block_on exactly as main.rs does
-                let server = TabletRemoteServer::new(None, meters, 0, None);
+                let server = TabletRemoteServer::new(None, meters, bypass, 0, None);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("Failed to bind ephemeral test socket");
@@ -298,7 +304,15 @@ fn test_remote_messages_serde_protocol() {
         _ => panic!("Expected SetHp2Volume"),
     }
 
-    // 7. StateSync serialization
+    // 7. SetGlobalBypass
+    let bypass_json = r#"{"type":"set_global_bypass","enabled":true}"#;
+    let msg: RemoteMessage = serde_json::from_str(bypass_json).unwrap();
+    match msg {
+        RemoteMessage::SetGlobalBypass { enabled } => assert!(enabled),
+        _ => panic!("Expected SetGlobalBypass"),
+    }
+
+    // 8. StateSync serialization
     let sync_msg = RemoteMessage::StateSync {
         input1: PreampChannelState {
             gain_db: 42,
@@ -326,6 +340,7 @@ fn test_remote_messages_serde_protocol() {
             comp_gr_db: 2.1,
             lim_gr_db: 0.0,
         },
+        global_bypass: true,
     };
 
     let serialized = serde_json::to_string(&sync_msg).unwrap();
@@ -334,4 +349,5 @@ fn test_remote_messages_serde_protocol() {
     assert!(serialized.contains(r#""mode":"Mic""#));
     assert!(serialized.contains(r#""phantom":true"#));
     assert!(serialized.contains(r#""hp2_step":22"#));
+    assert!(serialized.contains(r#""global_bypass":true"#));
 }
