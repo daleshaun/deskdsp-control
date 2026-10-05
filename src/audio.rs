@@ -360,7 +360,13 @@ pub fn apply_input_command(
         AudioCommand::InsertMonoNode { target, index, node } => {
             if target == CommandTarget::Channel1 || target == CommandTarget::Channel2 {
                 let cs = if target == CommandTarget::Channel1 { cs1 } else { cs2 };
-                cs.rack.insert(index, node);
+                if let Err(uninserted) = cs.rack.try_insert(index, node) {
+                    // Rack at preallocated capacity! Forward uninserted Box to garbage queue;
+                    // NEVER reallocate vector and NEVER drop on RT thread!
+                    if let Err(rtrb::PushError::Full(g)) = garbage_producer.push(AudioGarbage::MonoNode(uninserted)) {
+                        std::mem::forget(g);
+                    }
+                }
             } else {
                 if let Err(rtrb::PushError::Full(g)) = garbage_producer.push(AudioGarbage::MonoNode(node)) {
                     std::mem::forget(g);
@@ -460,7 +466,13 @@ pub fn apply_output_command(
         }
         AudioCommand::InsertStereoNode { target, index, node } => {
             if target == CommandTarget::Master {
-                master.rack.insert(index, node);
+                if let Err(uninserted) = master.rack.try_insert(index, node) {
+                    // Rack at preallocated capacity! Forward uninserted Box to garbage queue;
+                    // NEVER reallocate vector and NEVER drop on RT thread!
+                    if let Err(rtrb::PushError::Full(g)) = garbage_producer.push(AudioGarbage::StereoNode(uninserted)) {
+                        std::mem::forget(g);
+                    }
+                }
             } else {
                 if let Err(rtrb::PushError::Full(g)) = garbage_producer.push(AudioGarbage::StereoNode(node)) {
                     std::mem::forget(g);

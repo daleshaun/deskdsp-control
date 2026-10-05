@@ -349,3 +349,75 @@ fn test_garbage_queue_receives_retired_nodes_without_rt_drop() {
         "Node must be dropped on the UI cleanup thread, NOT the audio thread"
     );
 }
+
+#[test]
+fn test_rack_insert_at_capacity_boundary_zero_allocations_and_safe_garbage_return() {
+    let sample_rate = 48000.0_f32;
+    let mut cs1 = ChannelStrip::new(sample_rate);
+    let mut cs2 = ChannelStrip::new(sample_rate);
+
+    // 1. Fill cs1 rack up to exact capacity (16 nodes)
+    let initial_len = cs1.rack.len();
+    let capacity = cs1.rack.capacity();
+    assert_eq!(capacity, 16);
+    for _ in initial_len..capacity {
+        cs1.rack.push(Saturation::new(sample_rate));
+    }
+    assert_eq!(cs1.rack.len(), 16, "Rack must be exactly at maximum pre-allocated capacity");
+    assert_eq!(cs1.rack.capacity(), 16);
+
+    let (mut cmd_prod, mut cmd_cons) = rtrb::RingBuffer::<AudioCommand>::new(32);
+    let (mut garbage_prod, mut garbage_cons) = rtrb::RingBuffer::<AudioGarbage>::new(32);
+
+    let dropped_flag = Arc::new(AtomicBool::new(false));
+    let drop_thread = Arc::new(std::sync::Mutex::new(None));
+
+    // Construct 17th node (overflow candidate) on UI thread
+    let overflow_node = Box::new(DropTrackingNode::new(
+        Arc::clone(&dropped_flag),
+        Arc::clone(&drop_thread),
+    ));
+
+    // UI sends insert command targeting full rack
+    cmd_prod.push(AudioCommand::InsertMonoNode {
+        target: CommandTarget::Channel1,
+        index: 4,
+        node: overflow_node,
+    }).unwrap();
+
+    // 2. Audio Thread drains command inside assert_no_alloc!
+    // Proves:
+    // a) ZERO vector reallocations occur when attempting to insert at capacity!
+    // b) ZERO frees/drops occur on the audio thread!
+    assert_no_alloc(|| {
+        if let Ok(cmd) = cmd_cons.pop() {
+            apply_input_command(cmd, &mut garbage_prod, &mut cs1, &mut cs2);
+        }
+        // Process a block
+        for _ in 0..64 {
+            let _ = cs1.process(0.1);
+        }
+    });
+
+    // 3. Verify rack remained at capacity (16) and was NOT resized
+    assert_eq!(cs1.rack.len(), 16, "Rack length must not exceed capacity");
+    assert_eq!(cs1.rack.capacity(), 16, "Rack capacity must remain strictly 16 without realloc");
+
+    // 4. Verify overflow node was NOT dropped on audio thread
+    assert!(
+        !dropped_flag.load(Ordering::SeqCst),
+        "Overflow node must NOT be dropped on the audio thread!"
+    );
+
+    // 5. Verify overflow node was safely transferred to garbage queue
+    let mut garbage_count = 0;
+    while let Ok(g) = garbage_cons.pop() {
+        drop(g);
+        garbage_count += 1;
+    }
+    assert_eq!(garbage_count, 1, "Garbage queue must receive the rejected overflow node");
+    assert!(
+        dropped_flag.load(Ordering::SeqCst),
+        "Overflow node must be dropped only after cleanup thread drain"
+    );
+}

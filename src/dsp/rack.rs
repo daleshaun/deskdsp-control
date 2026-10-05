@@ -44,12 +44,30 @@ impl MonoRack {
         self.nodes.push(node);
     }
 
-    pub fn insert(&mut self, index: usize, node: Box<dyn DspNode>) {
+    #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    /// Attempt to insert a node without reallocating the underlying vector.
+    ///
+    /// If the rack is at maximum pre-allocated capacity (`len >= capacity`), the node is returned
+    /// in `Err(node)` so the caller can transfer it to the SPSC garbage queue rather than
+    /// reallocating or dropping on the real-time thread.
+    pub fn try_insert(&mut self, index: usize, node: Box<dyn DspNode>) -> Result<(), Box<dyn DspNode>> {
+        if self.nodes.len() >= self.nodes.capacity() {
+            return Err(node);
+        }
         if index <= self.nodes.len() {
             self.nodes.insert(index, node);
         } else {
             self.nodes.push(node);
         }
+        Ok(())
+    }
+
+    pub fn insert(&mut self, index: usize, node: Box<dyn DspNode>) {
+        let _ = self.try_insert(index, node);
     }
 
     pub fn remove(&mut self, index: usize) -> Option<Box<dyn DspNode>> {
@@ -184,12 +202,30 @@ impl StereoRack {
         self.nodes.push(node);
     }
 
-    pub fn insert(&mut self, index: usize, node: Box<dyn StereoDspNode>) {
+    #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    /// Attempt to insert a stereo node without reallocating the underlying vector.
+    ///
+    /// If the rack is at maximum pre-allocated capacity (`len >= capacity`), the node is returned
+    /// in `Err(node)` so the caller can transfer it to the SPSC garbage queue rather than
+    /// reallocating or dropping on the real-time thread.
+    pub fn try_insert(&mut self, index: usize, node: Box<dyn StereoDspNode>) -> Result<(), Box<dyn StereoDspNode>> {
+        if self.nodes.len() >= self.nodes.capacity() {
+            return Err(node);
+        }
         if index <= self.nodes.len() {
             self.nodes.insert(index, node);
         } else {
             self.nodes.push(node);
         }
+        Ok(())
+    }
+
+    pub fn insert(&mut self, index: usize, node: Box<dyn StereoDspNode>) {
+        let _ = self.try_insert(index, node);
     }
 
     pub fn remove(&mut self, index: usize) -> Option<Box<dyn StereoDspNode>> {

@@ -204,7 +204,7 @@ Run the verification test suite:
 cargo test
 ```
 
-### 17 Verified Offline Test Cases:
+### 18 Verified Offline Test Cases:
 1. **RBJ Biquad Coefficients:** Validates high-pass, low-shelf, peaking, and high-shelf filter coefficients against Robert Bristow-Johnson's Audio EQ Cookbook formulas.
 2. **Bit-Identical Bypass Guarantee:** Proves every DSP node passes audio bit-identically (`sample_in == sample_out`) when bypassed.
 3. **Compressor Transfer Curves:** Measures soft-knee threshold and gain reduction curves against mathematical expectations.
@@ -222,4 +222,5 @@ cargo test
 15. **LV2 Host Scanning & Port Bridging:** Verifies plugin discovery, control port parameter clamping, and stereo rack execution.
 16. **RT Zero Allocations Under Heavy Command Stream (`assert_no_alloc`):** Enforces 0 allocations and 0 frees in the audio processing thread while actively draining `InsertMonoNode`, `RemoveNode`, `SwapMonoRack`, `SetParam`, `SetBypass`, and `MoveNode` commands.
 17. **Garbage Return Queue Drop Isolation:** Validates that retired nodes removed from racks are never dropped on the audio thread, transferring safely to the cleanup thread where deallocation is performed off-thread.
+18. **Rack Insert-at-Capacity Boundary:** Proves that attempting to insert past pre-allocated capacity (`len >= capacity`) triggers zero vector reallocations on the audio thread, returning the uninserted node directly to the garbage return queue.
 
