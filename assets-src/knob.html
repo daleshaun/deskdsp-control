@@ -1,0 +1,95 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+  *{margin:0}html,body{width:100%;height:100%}
+  body{display:flex;align-items:center;justify-content:center;
+    background:transparent}
+  svg{width:94%;height:94%}
+</style></head><body>
+<svg viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="collar" cx="40%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#e9e9ee"/><stop offset="30%" stop-color="#b7b7bf"/>
+      <stop offset="58%" stop-color="#75757e"/><stop offset="80%" stop-color="#3a3a42"/>
+      <stop offset="100%" stop-color="#17171c"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.85"/>
+      <stop offset="18%" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="82%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.6"/>
+    </linearGradient>
+    <radialGradient id="body" cx="38%" cy="28%" r="80%">
+      <stop offset="0%" stop-color="#e8705e"/><stop offset="34%" stop-color="#c84c3f"/>
+      <stop offset="70%" stop-color="#9a382e"/><stop offset="100%" stop-color="#5a211b"/>
+    </radialGradient>
+    <radialGradient id="hotspot" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="60%" stop-color="#ffffff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cap" cx="40%" cy="32%" r="72%">
+      <stop offset="0%" stop-color="#b9b9c0"/><stop offset="55%" stop-color="#4a4a52"/><stop offset="100%" stop-color="#141418"/>
+    </radialGradient>
+    <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="9"/></filter>
+    <filter id="soft2" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="16"/></filter>
+    <filter id="grain">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.05 0" result="g"/>
+      <feComposite in="g" in2="SourceGraphic" operator="in"/>
+    </filter>
+  </defs>
+
+
+  <!-- metal collar -->
+  <circle cx="256" cy="256" r="202" fill="url(#collar)" stroke="#0c0c10" stroke-width="2"/>
+  <!-- machined concentric rings -->
+  <g stroke="#ffffff" stroke-opacity="0.05" fill="none">
+    <circle cx="256" cy="256" r="192"/><circle cx="256" cy="256" r="182"/><circle cx="256" cy="256" r="172"/>
+  </g>
+  <!-- metal grain -->
+  <circle cx="256" cy="256" r="202" filter="url(#grain)"/>
+  <!-- rim light on collar -->
+  <circle cx="256" cy="256" r="202" fill="url(#rim)"/>
+  <!-- knurl -->
+  <g stroke="#0c0c12" stroke-opacity="0.45" stroke-width="2">
+    <!-- generated below -->
+  </g>
+
+  <!-- bevel shadow ring between collar and body -->
+  <circle cx="256" cy="256" r="166" fill="none" stroke="#000" stroke-opacity="0.5" stroke-width="10" filter="url(#soft)"/>
+
+  <!-- red body -->
+  <circle cx="256" cy="256" r="160" fill="url(#body)" stroke="#0a0a0c" stroke-width="3"/>
+  <!-- bottom environment bounce -->
+  <path d="M120 320 A160 160 0 0 0 392 320" fill="none" stroke="#ff9a7a" stroke-opacity="0.18" stroke-width="20" filter="url(#soft)"/>
+  <!-- broad soft highlight -->
+  <ellipse cx="212" cy="190" rx="92" ry="60" fill="url(#hotspot)" filter="url(#soft)"/>
+  <!-- sharp hotspot -->
+  <ellipse cx="206" cy="176" rx="30" ry="18" fill="#ffffff" fill-opacity="0.75" filter="url(#soft)"/>
+
+  <!-- engraved pointer (groove + light edge) -->
+  <g>
+    <line x1="256" y1="256" x2="256" y2="118" stroke="#1a0b09" stroke-width="16" stroke-linecap="round"/>
+    <line x1="256" y1="256" x2="256" y2="120" stroke="#ffe9dd" stroke-width="7" stroke-linecap="round" stroke-opacity="0.92"/>
+  </g>
+
+  <!-- center cap / set screw -->
+  <circle cx="256" cy="256" r="30" fill="url(#cap)" stroke="#0a0a0c" stroke-width="2"/>
+  <ellipse cx="248" cy="246" rx="10" ry="6" fill="#fff" fill-opacity="0.35"/>
+</svg>
+<script>
+// draw knurl ticks around the collar outer edge
+const svg=document.querySelector("svg");
+const NS="http://www.w3.org/2000/svg";
+const g=svg.querySelectorAll("g")[1]; // the knurl group
+const cx=256,cy=256;
+for(let i=0;i<120;i++){
+  const a=i*3*Math.PI/180;
+  const r1=202,r2=190;
+  const x1=cx+r1*Math.sin(a),y1=cy-r1*Math.cos(a);
+  const x2=cx+r2*Math.sin(a),y2=cy-r2*Math.cos(a);
+  const l=document.createElementNS(NS,"line");
+  l.setAttribute("x1",x1);l.setAttribute("y1",y1);l.setAttribute("x2",x2);l.setAttribute("y2",y2);
+  g.appendChild(l);
+}
+</script>
+</body></html>
