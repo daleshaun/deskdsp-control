@@ -5,4 +5,5 @@ pub mod audio;
 pub mod dsp;
 pub mod hardware;
 pub mod presets;
+pub mod remote;
 pub mod ui;

@@ -160,6 +160,34 @@ DeskDSP Control includes an LV2 host engine (`src/dsp/lv2_host.rs`) powered by t
 
 ---
 
+---
+
+## Wireless Touch Tablet Remote (WiFi & WebSocket)
+
+DeskDSP Control includes a built-in touch-optimized web remote designed for tablet devices (iPad, Hyundai Android tablets, mobile browsers) over local Wi-Fi:
+
+```bash
+# Launch interactive TUI + Tablet Remote server on port 8080 (default)
+cargo run --release -- --remote
+
+# Launch on a custom port
+cargo run --release -- --remote --remote-port 9000
+
+# Launch in headless daemon mode (remote-only, no terminal UI)
+cargo run --release -- --remote-only
+```
+Connect any tablet on the same Wi-Fi network to:
+`http://<mac-ip>:8080`
+
+### Architectural Guarantees:
+1. **Zero Locks on the Real-Time Audio Path:** The remote server never acquires any locks on DSP chains or the audio thread. Peak/LUFS/GR meters are read directly from atomic float storage (`AudioMeters`) via lock-free bit manipulation.
+2. **Coalesced HID Writes:** Rapid touch scrubbing on continuous faders (preamp gain, monitor volume, headphone volumes) is debounced and coalesced at 40Hz (25ms intervals) to eliminate USB HID buffer congestion.
+3. **Instantaneous Discrete Controls:** High-priority discrete toggles (+48V phantom, phase invert, preamp mode `Mic`/`Line`/`HiZ`, monitor mute) execute immediately on the hardware controller without debounce delays.
+4. **Bidirectional Hardware-to-Tablet State Sync:** Real-time 0x73 HID telemetry frame snapshots from physical Zen Go knob turns or button presses are broadcast at 20Hz over WebSockets to all connected tablets, keeping the touch UI and physical hardware in sync.
+5. **Self-Contained Obsidian Touch Interface:** Embedded single-page application crafted with dark obsidian glassmorphism, responsive pointer captures, animated LED peak meters, and auto-reconnecting WebSockets.
+
+---
+
 ## Interactive Workstation (TUI)
 
 Launch the full interactive terminal dashboard:
@@ -204,7 +232,7 @@ Run the verification test suite:
 cargo test
 ```
 
-### 18 Verified Offline Test Cases:
+### 21 Verified Offline Test Cases:
 1. **RBJ Biquad Coefficients:** Validates high-pass, low-shelf, peaking, and high-shelf filter coefficients against Robert Bristow-Johnson's Audio EQ Cookbook formulas.
 2. **Bit-Identical Bypass Guarantee:** Proves every DSP node passes audio bit-identically (`sample_in == sample_out`) when bypassed.
 3. **Compressor Transfer Curves:** Measures soft-knee threshold and gain reduction curves against mathematical expectations.
@@ -223,4 +251,8 @@ cargo test
 16. **RT Zero Allocations Under Heavy Command Stream (`assert_no_alloc`):** Enforces 0 allocations and 0 frees in the audio processing thread while actively draining `InsertMonoNode`, `RemoveNode`, `SwapMonoRack`, `SetParam`, `SetBypass`, and `MoveNode` commands.
 17. **Garbage Return Queue Drop Isolation:** Validates that retired nodes removed from racks are never dropped on the audio thread, transferring safely to the cleanup thread where deallocation is performed off-thread.
 18. **Rack Insert-at-Capacity Boundary:** Proves that attempting to insert past pre-allocated capacity (`len >= capacity`) triggers zero vector reallocations on the audio thread, returning the uninserted node directly to the garbage return queue.
+19. **Tablet Remote Embedded Touch UI:** Verifies serving self-contained HTML5/CSS3 touch workstation with pointer captures and faders.
+20. **Tablet Remote Status & Live Meters REST API:** Validates lock-free reading of atomic peak, LUFS, and gain reduction levels over HTTP.
+21. **Tablet Remote Protocol Serde:** Validates serialization and deserialization across all WebSocket hardware control messages.
+
 

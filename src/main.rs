@@ -2,8 +2,10 @@ mod audio;
 mod dsp;
 mod hardware;
 mod presets;
+mod remote;
 mod ui;
 
+use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 
@@ -34,6 +36,18 @@ struct Args {
     /// Run non-interactive audio streaming test for N seconds
     #[arg(long)]
     test_audio: Option<u64>,
+
+    /// Enable wireless touch tablet remote server (axum + WebSockets)
+    #[arg(long, default_value_t = true)]
+    remote: bool,
+
+    /// Port for the wireless touch tablet remote server
+    #[arg(long, default_value_t = 8080)]
+    remote_port: u16,
+
+    /// Run only the wireless touch tablet remote server (headless daemon mode)
+    #[arg(long)]
+    remote_only: bool,
 }
 
 fn main() -> Result<()> {
@@ -131,6 +145,33 @@ fn main() -> Result<()> {
         }
         println!("✓ Audio streaming test completed successfully.");
         return Ok(());
+    }
+
+    if args.remote || args.remote_only {
+        let hw_remote = hw.clone();
+        let meters_remote = Arc::clone(&audio.meters);
+        let port = args.remote_port;
+
+        std::thread::Builder::new()
+            .name("tablet-remote-server".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("Failed to initialize tokio runtime");
+                let server = remote::TabletRemoteServer::new(hw_remote, meters_remote, port);
+                if let Err(e) = rt.block_on(server.run()) {
+                    eprintln!("Tablet remote server error: {e}");
+                }
+            })
+            .expect("Failed to spawn tablet remote thread");
+
+        println!("📡 Wireless Touch Tablet Remote running at: http://0.0.0.0:{}", args.remote_port);
+    }
+
+    if args.remote_only {
+        println!("Running in wireless tablet remote headless mode. Open http://localhost:{} on tablet.", args.remote_port);
+        println!("Press Ctrl+C to exit.");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
     }
 
     println!("Starting DeskDSP Control Terminal Workstation...");
