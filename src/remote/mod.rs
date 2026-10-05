@@ -22,7 +22,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::get,
     Router,
@@ -35,7 +35,7 @@ use crate::hardware::HardwareController;
 use antelope_protocol::PreampMode;
 
 mod assets;
-use assets::TABLET_TOUCH_HTML;
+use assets::{ICON_192_PNG, ICON_512_PNG, MANIFEST_JSON, SW_JS, TABLET_TOUCH_HTML};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -292,6 +292,10 @@ impl TabletRemoteServer {
 
         Router::new()
             .route("/", get(index_handler))
+            .route("/manifest.webmanifest", get(manifest_handler))
+            .route("/sw.js", get(sw_handler))
+            .route("/icon-192.png", get(icon_192_handler))
+            .route("/icon-512.png", get(icon_512_handler))
             .route("/ws", get(ws_handler))
             .route("/api/auth", get(auth_handler))
             .route("/api/status", get(status_handler))
@@ -418,6 +422,22 @@ fn is_authorized(
 
 async fn index_handler() -> Html<&'static str> {
     Html(TABLET_TOUCH_HTML)
+}
+
+async fn manifest_handler() -> Response {
+    ([(header::CONTENT_TYPE, "application/manifest+json")], MANIFEST_JSON).into_response()
+}
+
+async fn sw_handler() -> Response {
+    ([(header::CONTENT_TYPE, "text/javascript")], SW_JS).into_response()
+}
+
+async fn icon_192_handler() -> Response {
+    ([(header::CONTENT_TYPE, "image/png")], ICON_192_PNG).into_response()
+}
+
+async fn icon_512_handler() -> Response {
+    ([(header::CONTENT_TYPE, "image/png")], ICON_512_PNG).into_response()
 }
 
 async fn auth_handler(

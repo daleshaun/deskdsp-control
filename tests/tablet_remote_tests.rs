@@ -42,6 +42,68 @@ async fn test_tablet_remote_serves_html_touch_ui() {
     assert!(html.contains("data-tog=\"48v\""));
     assert!(html.contains("data-tog=\"mute\""));
     assert!(html.contains("pointerdown"));
+    assert!(html.contains(r#"<link rel="manifest" href="manifest.webmanifest">"#));
+    assert!(html.contains("navigator.serviceWorker.register"));
+}
+
+#[tokio::test]
+async fn test_tablet_remote_serves_pwa_assets_ungated() {
+    let meters = Arc::new(AudioMeters::default());
+    let bypass = Arc::new(AtomicBool::new(false));
+    // Server has a strict token configured, but PWA files MUST remain ungated
+    let server = TabletRemoteServer::new(None, meters, bypass, 8080, Some("strict-token-123".into()));
+
+    // 1. /manifest.webmanifest
+    let req = Request::builder()
+        .uri("/manifest.webmanifest")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get(header::CONTENT_TYPE).unwrap(), "application/manifest+json");
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(manifest["short_name"], "THE DESK");
+    assert_eq!(manifest["display"], "standalone");
+
+    // 2. /sw.js (served at root so scope covers entire site)
+    let req = Request::builder()
+        .uri("/sw.js")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get(header::CONTENT_TYPE).unwrap(), "text/javascript");
+    let sw_text = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    assert!(sw_text.contains("addEventListener"));
+
+    // 3. /icon-192.png
+    let req = Request::builder()
+        .uri("/icon-192.png")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get(header::CONTENT_TYPE).unwrap(), "image/png");
+    let icon192 = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    assert!(!icon192.is_empty());
+    assert_eq!(&icon192[1..4], b"PNG");
+
+    // 4. /icon-512.png
+    let req = Request::builder()
+        .uri("/icon-512.png")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get(header::CONTENT_TYPE).unwrap(), "image/png");
+    let icon512 = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    assert!(!icon512.is_empty());
+    assert_eq!(&icon512[1..4], b"PNG");
 }
 
 #[tokio::test]
