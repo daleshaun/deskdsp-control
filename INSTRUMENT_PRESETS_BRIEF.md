@@ -119,8 +119,9 @@ files to ship/manage, stays fully in-house / "my software, my logo"):
   4×12 response — presence bump ~2–4 kHz, steep low-pass ~5–6 kHz, high-pass
   ~80 Hz, a low-mid scoop. Cheap, no IR, fully yours.
 - **Convolution cab (v2, optional):** partitioned FFT convolution against a
-  short (≤2048-tap) impulse response baked into the binary as a `const`
-  array. Heavier; do only if the parametric voice isn't convincing.
+  short (≤2048-tap) impulse response. Use the **shared `ConvEngine`** (§4.6) —
+  the same convolution core as the `MicImage` node. Heavier; do only if the
+  parametric voice isn't convincing.
 - Expose a `cab_type` selector (e.g. `None / 1x12 / 2x12 / 4x12`).
 
 ### 4.3 `Drive` (`src/dsp/drive.rs`) — optional, for Bass/overdrive
@@ -140,6 +141,41 @@ files to ship/manage, stays fully in-house / "my software, my logo"):
 > allocated in `::new` (which runs off-thread via `build_rack`). Nothing grows
 > on the audio thread.
 
+### 4.6 `ConvEngine` (`src/dsp/conv_engine.rs`) — shared convolution core
+One partitioned FFT (uniform-partition overlap-save) convolution engine used
+by **both** `CabSim` (guitar) and `MicImage` (mic). Build it once:
+- Loads an IR (`&[f32]`) at construction; computes/caches partition FFTs in
+  `::new` (off-thread). All scratch buffers (FFT in/out, overlap ring,
+  accumulators) allocated in `::new`. **Nothing allocates in `process`.**
+- Partition size ~128–256 samples for low latency; handle IRs up to a few
+  thousand taps. Latency = one partition; document it.
+- Use a vetted no-`std`-alloc-in-loop FFT (e.g. `realfft`/`rustfft` with
+  preallocated plans/scratch). Verify under `assert_no_alloc`.
+- API: `ConvEngine::new(ir: &[f32], partition: usize, block: usize)`,
+  `process_block(&mut self, buf: &mut [f32])`, `reset()`.
+
+### 4.7 `MicImage` (`src/dsp/mic_image.rs`) — the "true mic image" (IR)
+Transforms the incoming signal toward a target mic's **measured magnitude +
+phase response**. This is the faithful path (vs. the EQ voicing profiles in
+§5.5, which only approximate).
+- Wraps a `ConvEngine` with a **transfer IR**. Critical: the loaded IR must be
+  `target ÷ reference` (the target mic's response *deconvolved by the capture
+  mic's response*), **not** the target's raw IR — otherwise the source mic's
+  own coloration is double-applied. State this in the UI/docs so users load
+  the right kind of IR.
+- IR source: the user's **own captured/measured** transfer IRs (fully
+  in-house), or generic voicing IRs. Do **not** ship branded mic-clone IRs.
+- `dry_wet` mix param (default 100% wet). `bypassed` default true.
+- Honest scope note to surface in the UI: an IR captures the **linear**
+  on-axis image only — not polar pattern, proximity effect, capsule
+  saturation, or self-noise. It's the mic's frequency+phase fingerprint, which
+  is the bulk of its character, not a full physical model.
+- IR loading happens off-thread via `build_rack` / a dedicated load command;
+  swapping a loaded IR follows the same `SwapRack`/garbage-return discipline
+  (build the new `MicImage`/rack off-thread, swap on the audio thread, return
+  the old one to the garbage queue). Never parse/resample an IR on the audio
+  thread.
+
 ## 5. Stereo keys/piano
 
 v1: run the Keys/Piano preset **dual-mono** — assign it to both CH1 and CH2;
@@ -152,12 +188,46 @@ both channels). Note the 2-input hardware limit: a stereo instrument uses
 *both* inputs, so you can't also track a separate mono source at the same
 time.
 
+## 5.5 Mic character for the Vocal preset (two tiers)
+
+The **Vocal** preset gains a mic-character selector with two tiers — the user
+picks faithfulness vs. convenience:
+
+**Tier A — Voicing profiles (lightweight, always available, no IR).** A tuned
+starting-point for the existing HPF / EQ / de-esser / gate. Pure EQ — an
+*approximation* of the mic's balance, not its true image. Use as the default
+and the no-IR fallback.
+- `WarmCondenser` — gentle HPF, slight presence lift, de-ess on.
+- `BroadcastDynamic` — clean high-gain makeup for low-output dynamics, tight
+  low-cut, low noise (SM7B-style use).
+- `DeskUsbMic` — aggressive HPF + desk-rumble notch + proximity tame.
+- `Ribbon` — high-shelf lift to counter ribbon roll-off, no harsh presence.
+- `LavHeadset` — thin-source EQ, stronger gate.
+
+Implement as a `MicVoicing` enum + a function that sets the Vocal rack's
+HPF/EQ/gate/de-ess params. No new node needed.
+
+**Tier B — True mic image (`MicImage`, §4.7).** The faithful path: IR
+convolution of a **transfer IR** (`target ÷ reference`) that reproduces the
+target mic's measured magnitude + phase. Insert the `MicImage` node at the
+head of the Vocal rack (after input trim, before HPF). Off when no IR loaded.
+Surface the honest scope note from §4.7 in the UI (linear on-axis image; not
+polar/proximity/saturation).
+
+Both tiers can coexist: a voicing profile for quick tone, a loaded transfer IR
+for the true image when the user has one.
+
 ## 6. Tablet UI (`tablet_v3.html` — auto-embedded via `include_str!`, no bake step)
 
 - Add a **per-channel instrument picker** on each channel (CH1, CH2): a
   segmented/dropdown control listing Vocal · E.Gtr · A.Gtr · Bass · Keys ·
   Piano · Program. Selecting sends
   `{type:"set_channel_preset", target:"ch1|ch2", preset:"vocal|eguitar|aguitar|bass|keys|piano|program"}`.
+- When **Vocal** is active, show a **mic-character sub-selector**: a voicing
+  dropdown (Tier A) plus a "Load mic image (IR)" slot (Tier B) with the
+  transfer-IR explainer and the linear-image scope note. Sends
+  `{type:"set_mic_voicing", target, voicing:"warm_condenser|..."}` and a
+  separate IR-load command for `MicImage`.
 - The PROCESSING tab should show the **modules for the active preset** (amp +
   cab faces when a guitar preset is active; chorus/reverb for keys/piano),
   reusing the existing hardware-faceplate styling and per-unit IN/BYP buttons.
@@ -173,7 +243,13 @@ time.
 - In the forwarder: match preset string → `InstrumentPreset`, call
   `build_rack` off-thread, enqueue `AudioCommand::SwapRack{target, rack}` on
   the correct per-target producer.
-- Emit each channel's active preset string in `state_sync`.
+- Add `set_mic_voicing` (Tier A) → sets Vocal rack HPF/EQ/gate/de-ess params
+  via the existing per-node command path.
+- Add a mic-image IR-load command (Tier B): read/resample the IR off-thread,
+  build a new `MicImage` (or rebuilt Vocal rack) off-thread, swap via
+  `SwapRack` + garbage-return. Never load/parse an IR on the audio thread.
+- Emit each channel's active preset, mic voicing, and whether a mic IR is
+  loaded in `state_sync`.
 
 ## 8. RT-safety checklist (must hold)
 
@@ -183,6 +259,8 @@ time.
 - [ ] Nonlinear stages (amp, drive) oversampled to control aliasing.
 - [ ] `assert_no_alloc` still passes under preset switching.
 - [ ] Single-producer invariant per rtrb producer preserved.
+- [ ] `ConvEngine`/`MicImage`: IR loaded + FFTs cached in `::new`; zero alloc
+      in `process`; IR load/resample/swap happens off-thread only.
 
 ## 9. Tests
 
@@ -201,6 +279,11 @@ time.
 2. `AudioCommand::SwapRack` + forwarder wiring + tablet picker. **Ship this
    first** — it already gives Vocal/Keys/Piano/Program per channel with zero
    new DSP.
-3. `GuitarAmp` + `CabSim` (parametric) → ElectricGuitar + Bass presets.
-4. `Chorus` + `Reverb` → fill out Keys/Piano.
-5. (optional) convolution cab; stereo-link mode.
+3. **Mic Tier A** — `MicVoicing` profiles for the Vocal preset + tablet
+   sub-selector. Pure param changes, no new DSP; ships fast.
+4. `GuitarAmp` + `CabSim` (parametric) → ElectricGuitar + Bass presets.
+5. `Chorus` + `Reverb` → fill out Keys/Piano.
+6. **`ConvEngine`** (shared convolution core) → then **`MicImage`** (Tier B,
+   true mic image via transfer IR) and the convolution cab, both on the same
+   engine.
+7. (optional) stereo-link mode.
