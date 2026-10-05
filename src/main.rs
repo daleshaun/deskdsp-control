@@ -60,10 +60,18 @@ struct Args {
     /// Audio output device name (e.g. "Zen Go", "BlackHole 2ch")
     #[arg(long)]
     output_device: Option<String>,
+
+    /// List all available audio input and output devices and exit
+    #[arg(long)]
+    list_devices: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.list_devices {
+        return AudioEngine::list_devices();
+    }
 
     println!("⚡ DeskDSP Control — Initializing Zen Go Hardware Controller...");
     let hw = match HardwareController::connect() {

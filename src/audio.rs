@@ -116,21 +116,21 @@ impl AudioEngine {
                 for d in &devs {
                     if let Ok(name) = d.name() {
                         if name.to_lowercase().contains(&target_lower) {
-                            println!("✓ Selected requested audio input device: '{name}'");
+                            println!("✓ Matched requested audio input device: \"{name}\" (pattern: \"{target}\")");
                             in_dev = Some(d.clone());
                             break;
                         }
                     }
                 }
                 if in_dev.is_none() {
-                    eprintln!("Notice: Requested input device '{target}' not found. Falling back to Zen Go / default...");
+                    eprintln!("⚠️ WARNING: Requested input device \"{target}\" NOT found in system devices! Falling back to Zen Go / default...");
                 }
             }
             if in_dev.is_none() {
                 for d in &devs {
                     if let Ok(name) = d.name() {
                         if name.contains("Zen Go") {
-                            println!("✓ Detected Zen Go input device: '{name}'");
+                            println!("✓ Detected Zen Go input device: \"{name}\"");
                             in_dev = Some(d.clone());
                             break;
                         }
@@ -147,21 +147,21 @@ impl AudioEngine {
                 for d in &devs {
                     if let Ok(name) = d.name() {
                         if name.to_lowercase().contains(&target_lower) {
-                            println!("✓ Selected requested audio output device: '{name}'");
+                            println!("✓ Matched requested audio output device: \"{name}\" (pattern: \"{target}\")");
                             out_dev = Some(d.clone());
                             break;
                         }
                     }
                 }
                 if out_dev.is_none() {
-                    eprintln!("Notice: Requested output device '{target}' not found. Falling back to Zen Go / default...");
+                    eprintln!("⚠️ WARNING: Requested output device \"{target}\" NOT found in system devices! Falling back to Zen Go / default...");
                 }
             }
             if out_dev.is_none() {
                 for d in &devs {
                     if let Ok(name) = d.name() {
                         if name.contains("Zen Go") {
-                            println!("✓ Detected Zen Go output device: '{name}'");
+                            println!("✓ Detected Zen Go output device: \"{name}\"");
                             out_dev = Some(d.clone());
                             break;
                         }
@@ -175,10 +175,10 @@ impl AudioEngine {
         let out_dev = out_dev.or_else(|| host.default_output_device()).ok_or_else(|| anyhow!("No audio output device available"))?;
 
         if let Ok(name) = in_dev.name() {
-            println!("🎤 Audio Input Device: {name}");
+            println!("🎤 Active Audio Input:  \"{name}\"");
         }
         if let Ok(name) = out_dev.name() {
-            println!("🔊 Audio Output Device: {name}");
+            println!("🔊 Active Audio Output: \"{name}\"");
         }
 
         let in_config = in_dev.default_input_config()?;
@@ -356,6 +356,38 @@ impl AudioEngine {
     #[allow(dead_code)]
     pub fn new_default() -> Result<Self> {
         Self::new(None, None)
+    }
+
+    pub fn list_devices() -> Result<()> {
+        let host = cpal::default_host();
+        println!("=== Available Audio Input Devices ===");
+        if let Ok(devices) = host.input_devices() {
+            let mut count = 0;
+            for (i, d) in devices.enumerate() {
+                if let Ok(name) = d.name() {
+                    count += 1;
+                    println!("  [{i}] \"{name}\"");
+                }
+            }
+            if count == 0 {
+                println!("  (No input devices found)");
+            }
+        }
+        println!("\n=== Available Audio Output Devices ===");
+        if let Ok(devices) = host.output_devices() {
+            let mut count = 0;
+            for (i, d) in devices.enumerate() {
+                if let Ok(name) = d.name() {
+                    count += 1;
+                    println!("  [{i}] \"{name}\"");
+                }
+            }
+            if count == 0 {
+                println!("  (No output devices found)");
+            }
+        }
+        println!();
+        Ok(())
     }
 
     /// Push a command to the audio thread via lock-free SPSC queue.
