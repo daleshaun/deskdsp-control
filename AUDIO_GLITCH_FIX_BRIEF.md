@@ -1,46 +1,46 @@
-# URGENT: harsh / clippy / scratchy playback — dual-clock ring underrun
+# Harsh / scratchy playback — IT'S THE DSP CHAIN (bypass is smooth)
 
-Symptom: playback through DeskDSP (input = "Bridge 2-A", output = "Zen Go") is
-harsh, clippy, scratchy — classic buffer under/overrun.
+UPDATE: BYPASS is smooth, ACTIVE is harsh. So routing / dual-clock / sample
+rates are FINE — ignore the earlier clock hypothesis. The harshness is produced
+by the DSP processing itself on real program material.
 
-## Root cause (confirmed in code)
-`AudioEngine::new` (src/audio.rs ~184-187) does:
-- `in_config = in_dev.default_input_config()`  (Bridge's own default rate)
-- `out_config = out_dev.default_output_config()` (Zen Go's own default rate)
-- builds the DSP at the INPUT rate, runs input and output as TWO independent
-  cpal streams joined by a plain rtrb ring — with NO rate check, NO resampling,
-  and NO shared clock. Two separate device clocks (a software Bridge + the Zen Go
-  hardware) drift and/or differ in rate, so the ring constantly empties
-  (`pop().unwrap_or(0.0)` injects silence) or overflows (`let _ = push`) =
-  continuous discontinuities = the harsh/scratchy sound.
+## Context
+The user routes system audio (music / YouTube) IN via "Bridge 2-A" and listens
+on the Zen Go. That stereo music currently runs through the **vocal CHANNEL
+STRIP** (cs1 on L, cs2 on R: HPF -> Gate -> De-Ess -> 4-Band EQ -> Comp ->
+TUNER -> Saturation) and then the master chain. A vocal strip on full-range
+polyphonic music will sound harsh — above all the **TUNER** (a monophonic pitch
+corrector: YIN detect + granular/WSOLA shift) mangles polyphonic music into
+scratchy/warbly artifacts, and **Saturation** distorts loud program.
 
-## Do these
-1. **Instrument startup (ship first, it's the smoking gun):** print
-   `in_config.sample_rate()`, `out_config.sample_rate()`, both `channels()`, and
-   the selected buffer size. Log a loud `⚠️ SAMPLE RATE MISMATCH` if in != out.
-   Run on the Mac and report the two rates.
-2. **Isolate DSP vs routing:** confirm whether BYPASS is ALSO harsh (it will be,
-   if this is the cause). Report.
-3. **Primary fix — single clock via one device.** The correct way to bridge a
-   software input + hardware output is ONE macOS **Aggregate Device** containing
-   both "Pro Tools Audio Bridge 2-A" and "Zen Go", with **Drift Correction**
-   enabled on the Zen Go, run with BOTH `--input-device` and `--output-device`
-   pointed at that aggregate. Document this clearly for the user; it gives one
-   clock and one rate. Verify playback is clean on the aggregate.
-4. **Code robustness (so it can't silently glitch):**
-   - If `in_rate != out_rate`, do NOT just run — either refuse with a clear
-     error naming both rates, OR insert a resampler on the ring so the output
-     always has data at its own rate.
-   - Build BOTH `ChannelStrip` and `MasterChain` at a single consistent rate
-     (today the master chain runs on the output stream but is built at the input
-     rate — wrong if they differ).
-   - Request a fixed, sane buffer size (`cpal::BufferSize::Fixed`) on both streams
-     where supported, and prime the ring (write a few ms of silence) before
-     `play()` to avoid startup underrun.
-   - Consider drift handling even when rates match (two hardware clocks still
-     drift): a slightly larger ring plus dropping/duplicating a sample when the
-     fill level crosses high/low watermarks, or a proper async resampler.
+## Isolate (do this and report which node is the offender)
+With music playing, disable nodes in the default channel strip one at a time and
+listen:
+1. Disable the **Tuner** node only -> expect most of the harshness to vanish.
+2. Then Saturation, then Gate, then EQ.
+Also A/B: bypass the whole channel strip but keep the master chain (glue/EQ/
+width/limiter) -> should be smooth and musical. Report findings.
 
-## Report back
-The printed input vs output sample rates, whether BYPASS is also harsh, and
-whether the single Aggregate Device makes it clean.
+## Fixes
+1. **Program vs vocal path.** For program material the vocal strip (especially
+   the Tuner) must not be in the path. Options, pick the cleanest:
+   - A "source mode" (VOCAL vs PROGRAM): PROGRAM routes input straight to the
+     master chain, skipping the vocal strip; VOCAL uses the full strip.
+   - OR default the vocal strip nodes (Tuner, Saturation, Gate) to BYPASSED and
+     let the user enable them. The Tuner must NOT be on by default.
+2. **Per-node bypass on the tablet.** Expose per-effect bypass so the user can
+   switch off the Tuner/Sat/Gate individually (the UI modules are ready for a
+   bypass control). Needs a WS message + the existing SetBypass/ToggleBypass
+   AudioCommand (reference the node by stable position/type, not a brittle
+   index).
+3. **Tuner safety:** when the Tuner can't find a stable monophonic pitch (low
+   YIN confidence / polyphonic input), it must pass audio through CLEAN rather
+   than shifting — verify it does; if not, add a confidence gate so it never
+   mangles program material.
+4. Sanity-check each node for NaN/denormal/overflow on hot stereo input; clamp
+   where needed. Saturation on loud input should soft-clip musically, not alias
+   harshly (oversample the nonlinearity if it's aliasing).
+
+## Report
+Which node(s) cause it, whether master-chain-only is clean, and the chosen
+program-vs-vocal routing fix.
