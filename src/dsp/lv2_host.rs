@@ -125,12 +125,13 @@ mod imp {
                 plugin.instantiate(self.features.as_ref().clone(), sample_rate)?
             };
 
-            let name = plugin.name();
+            let ctrl_buffer: Vec<f32> = controls.iter().map(|c| c.current_value).collect();
 
             Ok(Lv2Node {
                 name,
                 uri: uri.to_string(),
                 controls,
+                ctrl_buffer,
                 bypassed: false,
                 in_l: [0.0; 1],
                 in_r: [0.0; 1],
@@ -145,6 +146,7 @@ mod imp {
         pub name: String,
         pub uri: String,
         pub controls: Vec<Lv2ControlPort>,
+        ctrl_buffer: Vec<f32>,
         pub bypassed: bool,
         in_l: [f32; 1],
         in_r: [f32; 1],
@@ -155,8 +157,11 @@ mod imp {
 
     impl Lv2Node {
         pub fn set_control_value(&mut self, symbol: &str, value: f32) {
-            if let Some(port) = self.controls.iter_mut().find(|c| c.symbol == symbol) {
+            if let Some((i, port)) = self.controls.iter_mut().enumerate().find(|(_, c)| c.symbol == symbol) {
                 port.current_value = value.clamp(port.min, port.max);
+                if i < self.ctrl_buffer.len() {
+                    self.ctrl_buffer[i] = port.current_value;
+                }
             }
         }
     }
@@ -195,12 +200,12 @@ mod imp {
 
                 let audio_ins = [&self.in_l[..], &self.in_r[..]];
                 let mut audio_outs = [&mut self.out_l[..], &mut self.out_r[..]];
-                let ctrl_vals: Vec<f32> = self.controls.iter().map(|c| c.current_value).collect();
 
+                // Zero-allocation: use pre-allocated ctrl_buffer
                 let ports = livi::EmptyPortConnections::new()
                     .with_audio_inputs(audio_ins.into_iter())
                     .with_audio_outputs(audio_outs.iter_mut().map(|s| &mut s[..]))
-                    .with_control_inputs(ctrl_vals.iter().copied());
+                    .with_control_inputs(self.ctrl_buffer.iter().copied());
 
                 unsafe {
                     let _ = instance.run(1, &ports);

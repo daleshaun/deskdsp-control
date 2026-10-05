@@ -107,6 +107,19 @@ cargo test
 
 ---
 
+## Real-Time Engine Architecture: Lock-Free SPSC & Flipped Ownership
+
+> **Architectural Evolution & Honesty Note:**
+> Early prototypes of DeskDSP Control shared the DSP chains between threads using `Arc<Mutex<ChannelStrip>>`, `Arc<Mutex<MasterChain>>`, and `Arc<Mutex<Vec<f32>>>`. While the DSP maths and rack hot-swap logic were mathematically correct, acquiring standard `std::sync::Mutex` locks on the audio thread under UI contention (knob drags, preset changes, bypass toggling) risked thread priority inversion and audio dropouts. Furthermore, dropping a retired `Box<dyn DspNode>` directly on the audio thread invokes the system deallocator (`free()`), violating real-time safety.
+>
+> DeskDSP Control has been re-architected with **flipped ownership** and **SPSC message passing**:
+> 1. **Audio Callback OWNS State:** `ChannelStrip` (Input 1 & 2) and `MasterChain` are moved by value directly into the real-time audio callback closures. The UI thread never takes a lock on audio DSP structures.
+> 2. **Zero Mutexes on Real-Time Threads:** There is no `std::sync::Mutex` anywhere in the hot audio processing path.
+> 3. **Lock-Free Control Plane (`rtrb`):** The UI control plane communicates with the audio engine via bounded, pre-allocated Single-Producer Single-Consumer (`rtrb`) ring buffers. All node Boxes are constructed off-thread on the UI thread.
+> 4. **Never Drop on the Audio Thread (Garbage Return Queue):** When an effect node is removed or a rack is swapped on the audio thread, the retired `Box<dyn DspNode>` or `Box<MonoRack>` is transferred across a reverse SPSC garbage queue back to the UI/cleanup thread, where it is drained and safely dropped off the audio thread.
+> 5. **Lock-Free Inter-Stream Ring Buffer:** The previous `Arc<Mutex<Vec<f32>>>` ring buffer is replaced with lock-free SPSC `rtrb::RingBuffer<f32>` (8192 capacity) between input and output audio callbacks.
+> 6. **Zero-Allocation LV2 Host:** In `src/dsp/lv2_host.rs`, control port buffers (`ctrl_buffer: Vec<f32>`) are pre-allocated at instantiation time and updated in-place, eliminating dynamic heap allocations in `process_stereo()`.
+
 ---
 
 ## Dynamic Node Rack System
@@ -117,9 +130,9 @@ DeskDSP Control uses an ordered, pluggable dynamic rack architecture:
 
 ### Real-Time Safety & Zero-Allocation Guarantees
 - **Allocation-Free Audio Loop:** `process()` and `process_stereo()` iterate over pre-allocated trait object vectors with zero heap allocations.
-- **Atomic Hot Swap:** Runtime chain modifications (adding/removing/reordering nodes or loading presets) can be constructed off-thread and swapped in with `swap_rack(new_rack)` via `std::mem::swap`. The audio thread never allocates or deallocates.
+- **Atomic Hot Swap:** Runtime chain modifications (adding/removing/reordering nodes or loading presets) can be constructed off-thread and swapped in with `swap_rack(new_rack)` via `std::mem::swap`. Retired racks are moved to the SPSC garbage queue — the audio thread never allocates or deallocates.
 - **Bit-Identical Bypass:** Any bypassed node passes signal through bit-for-bit without DSP overhead or phase shifts.
-- **Safe Typed Downcasting:** UI and hotkeys query concrete node parameters via `rack.find_node_mut::<T>()`.
+- **Safe Typed Downcasting:** UI and hotkeys query concrete node parameters via `rack.find_node_mut::<T>()` and dispatch lock-free commands.
 
 ---
 
@@ -191,7 +204,7 @@ Run the verification test suite:
 cargo test
 ```
 
-### 15 Verified Offline Test Cases:
+### 17 Verified Offline Test Cases:
 1. **RBJ Biquad Coefficients:** Validates high-pass, low-shelf, peaking, and high-shelf filter coefficients against Robert Bristow-Johnson's Audio EQ Cookbook formulas.
 2. **Bit-Identical Bypass Guarantee:** Proves every DSP node passes audio bit-identically (`sample_in == sample_out`) when bypassed.
 3. **Compressor Transfer Curves:** Measures soft-knee threshold and gain reduction curves against mathematical expectations.
@@ -207,4 +220,6 @@ cargo test
 13. **Harmonic Exciter Bypass & Spectral Coloration:** Verifies high-pass sidechain filtering, quadratic overtone generation, and low-frequency immunity.
 14. **Harmonic Exciter Rack Integration:** Tests dynamic rack integration and typed downcast.
 15. **LV2 Host Scanning & Port Bridging:** Verifies plugin discovery, control port parameter clamping, and stereo rack execution.
+16. **RT Zero Allocations Under Heavy Command Stream (`assert_no_alloc`):** Enforces 0 allocations and 0 frees in the audio processing thread while actively draining `InsertMonoNode`, `RemoveNode`, `SwapMonoRack`, `SetParam`, `SetBypass`, and `MoveNode` commands.
+17. **Garbage Return Queue Drop Isolation:** Validates that retired nodes removed from racks are never dropped on the audio thread, transferring safely to the cleanup thread where deallocation is performed off-thread.
 

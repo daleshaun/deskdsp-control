@@ -116,6 +116,11 @@ impl MonoRack {
         sample
     }
 
+    /// Locate the index of the first node matching a concrete type.
+    pub fn position_of<T: 'static>(&self) -> Option<usize> {
+        self.nodes.iter().position(|n| n.as_any().is::<T>())
+    }
+
     /// Safe downcast to locate the first node matching a concrete type.
     pub fn find_node<T: 'static>(&self) -> Option<&T> {
         for node in &self.nodes {
@@ -251,6 +256,11 @@ impl StereoRack {
             right = r;
         }
         (left, right)
+    }
+
+    /// Locate the index of the first node matching a concrete type.
+    pub fn position_of<T: 'static>(&self) -> Option<usize> {
+        self.nodes.iter().position(|n| n.as_any().is::<T>())
     }
 
     pub fn find_node<T: 'static>(&self) -> Option<&T> {
