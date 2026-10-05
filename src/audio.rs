@@ -144,11 +144,19 @@ impl AudioEngine {
                         in_w_idx.store(w, Ordering::Relaxed);
 
                         // Update Channel Strip meters from CS1
-                        AudioMeters::store_f32(&in_meters.gate_reduction_db, cs1.gate.current_reduction_db());
-                        AudioMeters::store_f32(&in_meters.deesser_reduction_db, cs1.deesser.gain_reduction_db());
-                        AudioMeters::store_f32(&in_meters.comp_gr_db, cs1.compressor.gain_reduction_db());
-                        AudioMeters::store_f32(&in_meters.tuner_detected_freq, cs1.tuner.detected_freq_hz.unwrap_or(0.0));
-                        AudioMeters::store_f32(&in_meters.tuner_cents, cs1.tuner.cents_deviation);
+                        if let Some(gate) = cs1.gate() {
+                            AudioMeters::store_f32(&in_meters.gate_reduction_db, gate.current_reduction_db());
+                        }
+                        if let Some(deesser) = cs1.deesser() {
+                            AudioMeters::store_f32(&in_meters.deesser_reduction_db, deesser.gain_reduction_db());
+                        }
+                        if let Some(comp) = cs1.compressor() {
+                            AudioMeters::store_f32(&in_meters.comp_gr_db, comp.gain_reduction_db());
+                        }
+                        if let Some(tuner) = cs1.tuner() {
+                            AudioMeters::store_f32(&in_meters.tuner_detected_freq, tuner.detected_freq_hz.unwrap_or(0.0));
+                            AudioMeters::store_f32(&in_meters.tuner_cents, tuner.cents_deviation);
+                        }
                     }
 
                     AudioMeters::store_f32(&in_meters.in_l_peak, max_l);
@@ -208,11 +216,15 @@ impl AudioEngine {
                         out_r_idx.store(r, Ordering::Relaxed);
 
                         // Telemetry for Master Chain
-                        AudioMeters::store_f32(&out_meters.master_limiter_gr_db, master.limiter.gain_reduction_db());
-                        AudioMeters::store_f32(&out_meters.master_true_peak_dbtp, master.meter.max_true_peak_dbtp);
-                        AudioMeters::store_f32(&out_meters.momentary_lufs, master.meter.momentary_lufs);
-                        AudioMeters::store_f32(&out_meters.short_term_lufs, master.meter.short_term_lufs);
-                        AudioMeters::store_f32(&out_meters.integrated_lufs, master.meter.integrated_lufs);
+                        if let Some(limiter) = master.limiter() {
+                            AudioMeters::store_f32(&out_meters.master_limiter_gr_db, limiter.gain_reduction_db());
+                        }
+                        if let Some(meter) = master.meter() {
+                            AudioMeters::store_f32(&out_meters.master_true_peak_dbtp, meter.max_true_peak_dbtp);
+                            AudioMeters::store_f32(&out_meters.momentary_lufs, meter.momentary_lufs);
+                            AudioMeters::store_f32(&out_meters.short_term_lufs, meter.short_term_lufs);
+                            AudioMeters::store_f32(&out_meters.integrated_lufs, meter.integrated_lufs);
+                        }
                     }
 
                     AudioMeters::store_f32(&out_meters.out_l_peak, max_l);

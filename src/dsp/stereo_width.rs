@@ -1,5 +1,7 @@
 //! Stereo Width & Mid-Side Processor with Mono-Bass filtering.
 
+#![allow(dead_code)]
+
 use super::biquad::{BiquadFilter, FilterType};
 use super::StereoDspNode;
 
@@ -68,5 +70,13 @@ impl StereoDspNode for StereoWidthMidSide {
         let out_r = (mid - side) * inv_sqrt2;
 
         (out_l, out_r)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

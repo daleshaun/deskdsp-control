@@ -31,6 +31,7 @@ pub struct WorkstationApp {
     phase: [bool; 2],
     monitor_vol: u8,
     status_msg: String,
+    selected_rack_node: usize,
 }
 
 impl WorkstationApp {
@@ -45,6 +46,7 @@ impl WorkstationApp {
             phase: [false, false],
             monitor_vol: 0x20,
             status_msg: "DeskDSP Control active. Real-time audio streaming.".into(),
+            selected_rack_node: 0,
         }
     }
 
@@ -155,100 +157,209 @@ impl WorkstationApp {
                         KeyCode::Char('e') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.eq.bypassed = !cs.eq.bypassed;
-                                self.status_msg = format!("Channel {} EQ: {}", self.selected_channel + 1, if cs.eq.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(eq) = cs.eq_mut() {
+                                    eq.bypassed = !eq.bypassed;
+                                    self.status_msg = format!("Channel {} EQ: {}", self.selected_channel + 1, if eq.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         KeyCode::Char('c') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.compressor.bypassed = !cs.compressor.bypassed;
-                                self.status_msg = format!("Channel {} Compressor: {}", self.selected_channel + 1, if cs.compressor.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(comp) = cs.compressor_mut() {
+                                    comp.bypassed = !comp.bypassed;
+                                    self.status_msg = format!("Channel {} Compressor: {}", self.selected_channel + 1, if comp.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         KeyCode::Char('t') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.tuner.bypassed = !cs.tuner.bypassed;
-                                self.status_msg = format!("Channel {} Vocal Tuner: {}", self.selected_channel + 1, if cs.tuner.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(tuner) = cs.tuner_mut() {
+                                    tuner.bypassed = !tuner.bypassed;
+                                    self.status_msg = format!("Channel {} Vocal Tuner: {}", self.selected_channel + 1, if tuner.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         KeyCode::Char('k') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.tuner.quantizer.scale = match cs.tuner.quantizer.scale {
-                                    Scale::Chromatic => Scale::Major,
-                                    Scale::Major => Scale::NaturalMinor,
-                                    Scale::NaturalMinor => Scale::MajorPentatonic,
-                                    _ => Scale::Chromatic,
-                                };
-                                self.status_msg = format!("Tuner Scale: {:?}", cs.tuner.quantizer.scale);
+                                if let Some(tuner) = cs.tuner_mut() {
+                                    tuner.quantizer.scale = match tuner.quantizer.scale {
+                                        Scale::Chromatic => Scale::Major,
+                                        Scale::Major => Scale::NaturalMinor,
+                                        Scale::NaturalMinor => Scale::MajorPentatonic,
+                                        _ => Scale::Chromatic,
+                                    };
+                                    self.status_msg = format!("Tuner Scale: {:?}", tuner.quantizer.scale);
+                                }
                             }
                         }
                         KeyCode::Char('s') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.saturation.bypassed = !cs.saturation.bypassed;
-                                self.status_msg = format!("Channel {} Saturation: {}", self.selected_channel + 1, if cs.saturation.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(sat) = cs.saturation_mut() {
+                                    sat.bypassed = !sat.bypassed;
+                                    self.status_msg = format!("Channel {} Saturation: {}", self.selected_channel + 1, if sat.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         KeyCode::Char('x') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.gate.bypassed = !cs.gate.bypassed;
-                                self.status_msg = format!("Channel {} Noise Gate: {}", self.selected_channel + 1, if cs.gate.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(gate) = cs.gate_mut() {
+                                    gate.bypassed = !gate.bypassed;
+                                    self.status_msg = format!("Channel {} Noise Gate: {}", self.selected_channel + 1, if gate.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         KeyCode::Char('d') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.deesser.bypassed = !cs.deesser.bypassed;
-                                self.status_msg = format!("Channel {} De-Esser: {}", self.selected_channel + 1, if cs.deesser.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(deesser) = cs.deesser_mut() {
+                                    deesser.bypassed = !deesser.bypassed;
+                                    self.status_msg = format!("Channel {} De-Esser: {}", self.selected_channel + 1, if deesser.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         // Master Chain Toggles
                         KeyCode::Char('b') => {
                             if let Ok(mut master) = self.audio.master_chain.lock() {
-                                master.glue.bypassed = !master.glue.bypassed;
-                                self.status_msg = format!("Master Glue Compressor: {}", if master.glue.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(glue) = master.glue_mut() {
+                                    glue.bypassed = !glue.bypassed;
+                                    self.status_msg = format!("Master Glue Compressor: {}", if glue.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         KeyCode::Char('l') => {
                             if let Ok(mut master) = self.audio.master_chain.lock() {
-                                master.limiter.bypassed = !master.limiter.bypassed;
-                                self.status_msg = format!("Master Brickwall Limiter: {}", if master.limiter.bypassed { "BYPASS" } else { "ACTIVE" });
+                                if let Some(limiter) = master.limiter_mut() {
+                                    limiter.bypassed = !limiter.bypassed;
+                                    self.status_msg = format!("Master Brickwall Limiter: {}", if limiter.bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
                             }
                         }
                         // Adjust Compressor Threshold
                         KeyCode::Char('[') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.compressor.threshold_db = (cs.compressor.threshold_db - 2.0).max(-40.0);
-                                self.status_msg = format!("Comp Thresh: {:.1} dB", cs.compressor.threshold_db);
+                                if let Some(comp) = cs.compressor_mut() {
+                                    comp.threshold_db = (comp.threshold_db - 2.0).max(-40.0);
+                                    self.status_msg = format!("Comp Thresh: {:.1} dB", comp.threshold_db);
+                                }
                             }
                         }
                         KeyCode::Char(']') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                cs.compressor.threshold_db = (cs.compressor.threshold_db + 2.0).min(0.0);
-                                self.status_msg = format!("Comp Thresh: {:.1} dB", cs.compressor.threshold_db);
+                                if let Some(comp) = cs.compressor_mut() {
+                                    comp.threshold_db = (comp.threshold_db + 2.0).min(0.0);
+                                    self.status_msg = format!("Comp Thresh: {:.1} dB", comp.threshold_db);
+                                }
                             }
                         }
                         // Adjust Saturation Drive
                         KeyCode::Char('{') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                let new_drive = (cs.saturation.drive + 0.5).min(10.0);
-                                cs.saturation.set_drive(new_drive);
-                                self.status_msg = format!("Saturation Drive: {:.1}x", cs.saturation.drive);
+                                if let Some(sat) = cs.saturation_mut() {
+                                    let new_drive = (sat.drive + 0.5).min(10.0);
+                                    sat.set_drive(new_drive);
+                                    self.status_msg = format!("Saturation Drive: {:.1}x", sat.drive);
+                                }
                             }
                         }
                         KeyCode::Char('}') => {
                             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
                             if let Ok(mut cs) = cs_arc.lock() {
-                                let new_drive = (cs.saturation.drive - 0.5).max(1.0);
-                                cs.saturation.set_drive(new_drive);
-                                self.status_msg = format!("Saturation Drive: {:.1}x", cs.saturation.drive);
+                                if let Some(sat) = cs.saturation_mut() {
+                                    let new_drive = (sat.drive - 0.5).max(1.0);
+                                    sat.set_drive(new_drive);
+                                    self.status_msg = format!("Saturation Drive: {:.1}x", sat.drive);
+                                }
+                            }
+                        }
+                        // Dynamic Node Rack Interactive Controls
+                        KeyCode::Tab => {
+                            let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
+                            if let Ok(cs) = cs_arc.lock() {
+                                if !cs.rack.is_empty() {
+                                    self.selected_rack_node = (self.selected_rack_node + 1) % cs.rack.len();
+                                    if let Some(node) = cs.rack.get(self.selected_rack_node) {
+                                        self.status_msg = format!("Selected Node [{}]: {}", self.selected_rack_node + 1, node.name());
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::BackTab => {
+                            let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
+                            if let Ok(cs) = cs_arc.lock() {
+                                if !cs.rack.is_empty() {
+                                    self.selected_rack_node = if self.selected_rack_node == 0 { cs.rack.len() - 1 } else { self.selected_rack_node - 1 };
+                                    if let Some(node) = cs.rack.get(self.selected_rack_node) {
+                                        self.status_msg = format!("Selected Node [{}]: {}", self.selected_rack_node + 1, node.name());
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
+                            if let Ok(mut cs) = cs_arc.lock() {
+                                if self.selected_rack_node < cs.rack.len() {
+                                    cs.rack.toggle_bypass(self.selected_rack_node);
+                                    let name = cs.rack.get(self.selected_rack_node).map(|n| n.name()).unwrap_or("Node");
+                                    let bypassed = cs.rack.is_bypassed(self.selected_rack_node);
+                                    self.status_msg = format!("Node [{} - {}]: {}", self.selected_rack_node + 1, name, if bypassed { "BYPASS" } else { "ACTIVE" });
+                                }
+                            }
+                        }
+                        KeyCode::Char('<') => {
+                            let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
+                            if let Ok(mut cs) = cs_arc.lock() {
+                                if self.selected_rack_node > 0 && self.selected_rack_node < cs.rack.len() {
+                                    cs.rack.swap(self.selected_rack_node, self.selected_rack_node - 1);
+                                    self.selected_rack_node -= 1;
+                                    let name = cs.rack.get(self.selected_rack_node).map(|n| n.name()).unwrap_or("Node");
+                                    self.status_msg = format!("Reordered: moved [{}] up to slot {}", name, self.selected_rack_node + 1);
+                                }
+                            }
+                        }
+                        KeyCode::Char('>') => {
+                            let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
+                            if let Ok(mut cs) = cs_arc.lock() {
+                                if self.selected_rack_node + 1 < cs.rack.len() {
+                                    cs.rack.swap(self.selected_rack_node, self.selected_rack_node + 1);
+                                    self.selected_rack_node += 1;
+                                    let name = cs.rack.get(self.selected_rack_node).map(|n| n.name()).unwrap_or("Node");
+                                    self.status_msg = format!("Reordered: moved [{}] down to slot {}", name, self.selected_rack_node + 1);
+                                }
+                            }
+                        }
+                        KeyCode::Char('a') => {
+                            let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
+                            if let Ok(mut cs) = cs_arc.lock() {
+                                if cs.rack.len() < 16 {
+                                    let sat = crate::dsp::saturation::Saturation::new(self.audio.sample_rate as f32);
+                                    cs.rack.push(sat);
+                                    self.status_msg = format!("Added new Saturation stage to rack (total {} nodes)", cs.rack.len());
+                                } else {
+                                    self.status_msg = "Rack at maximum capacity (16 nodes)".into();
+                                }
+                            }
+                        }
+                        KeyCode::Delete | KeyCode::Backspace => {
+                            let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
+                            if let Ok(mut cs) = cs_arc.lock() {
+                                if cs.rack.len() > 1 && self.selected_rack_node < cs.rack.len() {
+                                    if let Some(removed) = cs.rack.remove(self.selected_rack_node) {
+                                        self.status_msg = format!("Removed [{}] from rack", removed.name());
+                                        if self.selected_rack_node >= cs.rack.len() {
+                                            self.selected_rack_node = cs.rack.len().saturating_sub(1);
+                                        }
+                                    }
+                                } else {
+                                    self.status_msg = "Cannot remove last node in chain".into();
+                                }
                             }
                         }
                         _ => {}
@@ -294,48 +405,62 @@ impl WorkstationApp {
         .block(Block::default().borders(Borders::ALL).title("Hardware Front-End (USB HID Control Plane)"));
         f.render_widget(hw_paragraph, chunks[1]);
 
-        // 3. Vocal Channel Strip Status
-        let (gate_st, deess_st, eq_st, comp_st, tuner_st, sat_st) = {
+        // 3. Dynamic Vocal Channel Strip Rack Status
+        let (rack_spans, node_count, selected_desc) = {
             let cs_arc = if self.selected_channel == 0 { &self.audio.channel_strip_1 } else { &self.audio.channel_strip_2 };
             if let Ok(cs) = cs_arc.lock() {
-                (
-                    if cs.gate.bypassed { "BYPASS" } else { "ON (-42dB)" },
-                    if cs.deesser.bypassed { "BYPASS" } else { "ON (6.5kHz)" },
-                    if cs.eq.bypassed { "BYPASS" } else { "ON (HPF 80Hz | LS 100 | Mid 450/3.2k | HS 10k)" },
-                    if cs.compressor.bypassed { "BYPASS" } else { "ON (Opto/FET Soft-Knee)" },
-                    if cs.tuner.bypassed { "BYPASS" } else { "ACTIVE (YIN + Scale Quantizer + PSOLA)" },
-                    if cs.saturation.bypassed { "BYPASS" } else { "ON (Tube/Tape Saturation + DC Blocker)" },
-                )
+                let mut spans = Vec::new();
+                for (i, node) in cs.rack.nodes.iter().enumerate() {
+                    let is_sel = i == self.selected_rack_node;
+                    let bypassed = node.is_bypassed();
+                    let (fg, bg) = if is_sel {
+                        (Color::Black, if bypassed { Color::LightRed } else { Color::Yellow })
+                    } else if bypassed {
+                        (Color::DarkGray, Color::Reset)
+                    } else {
+                        (Color::Green, Color::Reset)
+                    };
+                    let status = if bypassed { "BYPASS" } else { "ON" };
+                    spans.push(Span::styled(
+                        format!("[{}:{}:{}] ", i + 1, node.name(), status),
+                        Style::default().fg(fg).bg(bg).add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() })
+                    ));
+                }
+                let desc = if let Some(node) = cs.rack.get(self.selected_rack_node) {
+                    format!("Node #{}: {} [{}]", self.selected_rack_node + 1, node.name(), if node.is_bypassed() { "BYPASS" } else { "ACTIVE" })
+                } else {
+                    "No node selected".into()
+                };
+                (spans, cs.rack.len(), desc)
             } else {
-                ("ON", "ON", "ON", "ON", "ON", "ON")
+                (vec![Span::raw("Rack locked...")], 0, "Locked".into())
             }
         };
 
         let cs_paragraph = Paragraph::new(vec![
+            Line::from(rack_spans),
             Line::from(vec![
-                Span::styled("Gate: ", Style::default().fg(Color::Green)), Span::raw(format!("{:<10} ", gate_st)),
-                Span::styled("De-Esser: ", Style::default().fg(Color::Green)), Span::raw(format!("{:<12} ", deess_st)),
-                Span::styled("4-Band EQ: ", Style::default().fg(Color::Green)), Span::raw(eq_st),
+                Span::styled("Selected: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("{:<30} ", selected_desc)),
+                Span::styled("Rack controls: ", Style::default().fg(Color::DarkGray)),
+                Span::raw("[Tab] Select | [Space] Bypass | [< / >] Move | [a] Add | [Del] Remove"),
             ]),
             Line::from(vec![
-                Span::styled("Compressor: ", Style::default().fg(Color::Green)), Span::raw(format!("{:<22} ", comp_st)),
-                Span::styled("Tuner: ", Style::default().fg(Color::Yellow)), Span::raw(tuner_st),
-            ]),
-            Line::from(vec![
-                Span::styled("Saturation: ", Style::default().fg(Color::Green)), Span::raw(sat_st),
+                Span::styled("Quick toggles: ", Style::default().fg(Color::Cyan)),
+                Span::raw("[e] EQ  [c] Comp  [t] Tuner  [k] Scale  [s] Sat  [x] Gate  [d] DeEsser  [[ / ]] Thresh  [{ / }] Drive"),
             ]),
         ])
-        .block(Block::default().borders(Borders::ALL).title(format!("Channel Strip {} (Tracking DSP Pipeline)", self.selected_channel + 1)));
+        .block(Block::default().borders(Borders::ALL).title(format!("Channel Strip {} (Tracking DSP Rack: {} nodes)", self.selected_channel + 1, node_count)));
         f.render_widget(cs_paragraph, chunks[2]);
 
         // 4. Master Chain Status
         let (m_eq, m_mb, m_w, m_glue, m_lim) = if let Ok(m) = self.audio.master_chain.lock() {
             (
-                if m.eq.is_bypassed() { "BYPASS" } else { "ON (5-Band Min-Phase)" },
-                if m.multiband.is_bypassed() { "BYPASS" } else { "ON (3-Band LR4)" },
-                if m.stereo_width.is_bypassed() { "BYPASS" } else { "ON (M/S Width + Mono-Bass)" },
-                if m.glue.is_bypassed() { "BYPASS" } else { "ON (VCA Bus + Tape)" },
-                if m.limiter.is_bypassed() { "BYPASS" } else { "ON (-1.0 dBTP Ceiling)" },
+                if m.eq().map_or(true, |e| e.is_bypassed()) { "BYPASS" } else { "ON (5-Band Min-Phase)" },
+                if m.multiband().map_or(true, |mb| mb.is_bypassed()) { "BYPASS" } else { "ON (3-Band LR4)" },
+                if m.stereo_width().map_or(true, |w| w.is_bypassed()) { "BYPASS" } else { "ON (M/S Width + Mono-Bass)" },
+                if m.glue().map_or(true, |g| g.is_bypassed()) { "BYPASS" } else { "ON (VCA Bus + Tape)" },
+                if m.limiter().map_or(true, |l| l.is_bypassed()) { "BYPASS" } else { "ON (-1.0 dBTP Ceiling)" },
             )
         } else {
             ("ON", "ON", "ON", "ON", "ON")
@@ -413,7 +538,7 @@ impl WorkstationApp {
         f.render_widget(tuner_line, meter_layout[3]);
 
         // 6. Help / Status bar
-        let help_text = format!("[1/2] Ch | [g/G] Gain | [p] 48V | [m] Mode | [v/V] Vol | [e/c/t/s/x/d] DSP | [k] Scale | [b/l] Master | [q] Quit  >> {}", self.status_msg);
+        let help_text = format!("[Tab/Space/< >/a/Del] Rack | [1/2] Ch | [g/G] Gain | [p] 48V | [m] Mode | [v/V] Vol | [e/c/t/s/x/d] DSP | [b/l] Master | [q] Quit  >> {}", self.status_msg);
         let help_para = Paragraph::new(help_text)
             .style(Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD))
             .block(Block::default().borders(Borders::ALL).title("DeskDSP Control Plane"));

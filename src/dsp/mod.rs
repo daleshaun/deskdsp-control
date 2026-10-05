@@ -4,6 +4,8 @@
 //! Nodes implement `DspNode` (monophonic) or `StereoDspNode` (stereo).
 //! Bypassed nodes guarantee bit-identical passthrough.
 
+#![allow(dead_code, unused_imports)]
+
 pub mod biquad;
 pub mod dc_blocker;
 pub mod envelope;
@@ -18,11 +20,25 @@ pub mod stereo_width;
 pub mod glue_compressor;
 pub mod limiter;
 pub mod lufs_meter;
+pub mod rack;
 pub mod channel_strip;
 pub mod master_chain;
 
 pub use channel_strip::ChannelStrip;
 pub use master_chain::MasterChain;
+pub use rack::{MonoRack, StereoRack};
+
+/// Real-time node telemetry for UI and meters without heap allocations.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeTelemetry {
+    pub gain_reduction_db: f32,
+    pub detected_freq_hz: f32,
+    pub cents_deviation: f32,
+    pub true_peak_dbtp: f32,
+    pub momentary_lufs: f32,
+    pub short_term_lufs: f32,
+    pub integrated_lufs: f32,
+}
 
 /// Trait for real-time monophonic DSP nodes.
 pub trait DspNode: Send + 'static {
@@ -51,6 +67,15 @@ pub trait DspNode: Send + 'static {
             *s = self.process_sample(*s);
         }
     }
+
+    /// Report real-time telemetry (GR, pitch, peak)
+    fn telemetry(&self) -> NodeTelemetry {
+        NodeTelemetry::default()
+    }
+
+    /// Downcast support
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// Trait for real-time stereo DSP nodes.
@@ -75,4 +100,13 @@ pub trait StereoDspNode: Send + 'static {
             right_buf[i] = r;
         }
     }
+
+    /// Report real-time telemetry (GR, loudness, True-Peak)
+    fn telemetry(&self) -> NodeTelemetry {
+        NodeTelemetry::default()
+    }
+
+    /// Downcast support
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }

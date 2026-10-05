@@ -1,20 +1,27 @@
-//! Vocal-focused Channel Strip with ordered node pipeline.
+//! Vocal-focused Channel Strip with Dynamic Node Rack.
 //!
-//! Signal Order (as specified in brief):
+//! Signal Order (by default):
 //! 1. Input Trim & Phase Invert
-//! 2. High-Pass Filter (Low-cut)
+//! 2. High-Pass Filter (Low-cut 80 Hz)
 //! 3. Noise Gate / Downward Expander
 //! 4. Vocal De-Esser
 //! 5. 4-Band Parametric EQ (Low-shelf, Low-mid, High-mid, High-shelf)
 //! 6. Vocal Compressor (Opto / FET feel with soft knee)
-//! 7. Vocal Tuner (YIN pitch detection + scale quantizing + time-domain pitch shifting)
+//! 7. Vocal Tuner (YIN pitch detection + scale quantizing + granular pitch shifting)
 //! 8. Analog Saturation (Tube / Tape coloration + DC blocker)
 //! 9. Output Trim & Peak Limiting
+//!
+//! Nodes are contained in an ordered `MonoRack` (`Vec<Box<dyn DspNode>>`)
+//! supporting runtime reordering, bypass toggling, and addition/removal without
+//! audio-thread allocations.
+
+#![allow(dead_code)]
 
 use super::biquad::{BiquadFilter, FilterType};
 use super::compressor::VocalCompressor;
 use super::deesser::DeEsser;
 use super::gate::NoiseGate;
+use super::rack::MonoRack;
 use super::saturation::Saturation;
 use super::tuner::VocalTuner;
 use super::DspNode;
@@ -71,53 +78,40 @@ impl DspNode for ParametricEq4Band {
         input = self.high_shelf.process_sample(input);
         input
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
-#[derive(Debug, Clone)]
 pub struct ChannelStrip {
-    // 1. Input Trim & Phase
+    pub rack: MonoRack,
     pub input_gain_db: f32,
     pub phase_invert: bool,
-
-    // 2. High-Pass Filter
-    pub high_pass: BiquadFilter,
-
-    // 3. Noise Gate / Expander
-    pub gate: NoiseGate,
-
-    // 4. Vocal De-Esser
-    pub deesser: DeEsser,
-
-    // 5. 4-Band Parametric EQ
-    pub eq: ParametricEq4Band,
-
-    // 6. Vocal Compressor
-    pub compressor: VocalCompressor,
-
-    // 7. Vocal Tuner
-    pub tuner: VocalTuner,
-
-    // 8. Analog Saturation
-    pub saturation: Saturation,
-
-    // 9. Output Trim
     pub output_gain_db: f32,
-
     pub sample_rate: f32,
 }
 
 impl ChannelStrip {
     pub fn new(sample_rate: f32) -> Self {
+        let mut rack = MonoRack::with_capacity(16);
+        // Default ordered tracking chain
+        rack.push(BiquadFilter::new(FilterType::HighPass, 80.0, 0.0, sample_rate)); // 0: HPF 80Hz
+        rack.push(NoiseGate::new(sample_rate));                                     // 1: Noise Gate
+        rack.push(DeEsser::new(sample_rate));                                       // 2: De-Esser
+        rack.push(ParametricEq4Band::new(sample_rate));                             // 3: 4-Band EQ
+        rack.push(VocalCompressor::new(sample_rate));                               // 4: Compressor
+        rack.push(VocalTuner::new(sample_rate));                                    // 5: Vocal Tuner
+        rack.push(Saturation::new(sample_rate));                                    // 6: Saturation
+
         Self {
+            rack,
             input_gain_db: 0.0,
             phase_invert: false,
-            high_pass: BiquadFilter::new(FilterType::HighPass, 80.0, 0.0, sample_rate),
-            gate: NoiseGate::new(sample_rate),
-            deesser: DeEsser::new(sample_rate),
-            eq: ParametricEq4Band::new(sample_rate),
-            compressor: VocalCompressor::new(sample_rate),
-            tuner: VocalTuner::new(sample_rate),
-            saturation: Saturation::new(sample_rate),
             output_gain_db: 0.0,
             sample_rate,
         }
@@ -125,7 +119,7 @@ impl ChannelStrip {
 
     #[inline(always)]
     pub fn process(&mut self, mut sample: f32) -> f32 {
-        // 1. Input Trim & Phase
+        // 1. Input Trim & Phase Invert
         if self.phase_invert {
             sample = -sample;
         }
@@ -133,43 +127,69 @@ impl ChannelStrip {
             sample *= 10.0_f32.powf(self.input_gain_db / 20.0);
         }
 
-        // 2. High-Pass Filter
-        sample = self.high_pass.process_sample(sample);
+        // 2. Ordered Rack Processing (zero allocation)
+        sample = self.rack.process(sample);
 
-        // 3. Noise Gate / Expander
-        sample = self.gate.process_sample(sample);
-
-        // 4. De-Esser
-        sample = self.deesser.process_sample(sample);
-
-        // 5. Parametric EQ
-        sample = self.eq.process_sample(sample);
-
-        // 6. Vocal Compressor
-        sample = self.compressor.process_sample(sample);
-
-        // 7. Vocal Tuner
-        sample = self.tuner.process_sample(sample);
-
-        // 8. Analog Saturation
-        sample = self.saturation.process_sample(sample);
-
-        // 9. Output Trim
+        // 3. Output Trim & Safety Peak Limit
         if self.output_gain_db.abs() > 0.001 {
             sample *= 10.0_f32.powf(self.output_gain_db / 20.0);
         }
 
-        // Safety peak limit
         sample.clamp(-0.999, 0.999)
     }
 
     pub fn reset_all(&mut self) {
-        self.high_pass.reset();
-        self.gate.reset();
-        self.deesser.reset();
-        self.eq.reset();
-        self.compressor.reset();
-        self.tuner.reset();
-        self.saturation.reset();
+        self.rack.reset();
+    }
+
+    /// Safely swap the active rack with a pre-built rack constructed off-thread.
+    /// Returns the old rack so it is dropped on the caller thread, avoiding
+    /// any audio-thread allocations or deallocations.
+    pub fn swap_rack(&mut self, mut new_rack: MonoRack) -> MonoRack {
+        std::mem::swap(&mut self.rack, &mut new_rack);
+        new_rack
+    }
+
+    // Typed node accessors for telemetry & hotkey adjustments
+    pub fn gate(&self) -> Option<&NoiseGate> {
+        self.rack.find_node::<NoiseGate>()
+    }
+    pub fn gate_mut(&mut self) -> Option<&mut NoiseGate> {
+        self.rack.find_node_mut::<NoiseGate>()
+    }
+
+    pub fn deesser(&self) -> Option<&DeEsser> {
+        self.rack.find_node::<DeEsser>()
+    }
+    pub fn deesser_mut(&mut self) -> Option<&mut DeEsser> {
+        self.rack.find_node_mut::<DeEsser>()
+    }
+
+    pub fn eq(&self) -> Option<&ParametricEq4Band> {
+        self.rack.find_node::<ParametricEq4Band>()
+    }
+    pub fn eq_mut(&mut self) -> Option<&mut ParametricEq4Band> {
+        self.rack.find_node_mut::<ParametricEq4Band>()
+    }
+
+    pub fn compressor(&self) -> Option<&VocalCompressor> {
+        self.rack.find_node::<VocalCompressor>()
+    }
+    pub fn compressor_mut(&mut self) -> Option<&mut VocalCompressor> {
+        self.rack.find_node_mut::<VocalCompressor>()
+    }
+
+    pub fn tuner(&self) -> Option<&VocalTuner> {
+        self.rack.find_node::<VocalTuner>()
+    }
+    pub fn tuner_mut(&mut self) -> Option<&mut VocalTuner> {
+        self.rack.find_node_mut::<VocalTuner>()
+    }
+
+    pub fn saturation(&self) -> Option<&Saturation> {
+        self.rack.find_node::<Saturation>()
+    }
+    pub fn saturation_mut(&mut self) -> Option<&mut Saturation> {
+        self.rack.find_node_mut::<Saturation>()
     }
 }

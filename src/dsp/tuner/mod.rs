@@ -125,4 +125,20 @@ impl DspNode for VocalTuner {
 
         self.shifter.process_sample(input)
     }
+
+    fn telemetry(&self) -> super::NodeTelemetry {
+        super::NodeTelemetry {
+            detected_freq_hz: self.detected_freq_hz.unwrap_or(0.0),
+            cents_deviation: self.cents_deviation,
+            ..Default::default()
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

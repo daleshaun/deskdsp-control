@@ -1,5 +1,7 @@
 //! Classic VCA Mix-Bus Glue Compressor with Sidechain HPF and Tape Warmth.
 
+#![allow(dead_code)]
+
 use super::biquad::{BiquadFilter, FilterType};
 use super::saturation::{Saturation, SaturationFlavor};
 use super::{DspNode, StereoDspNode};
@@ -144,5 +146,20 @@ impl StereoDspNode for GlueCompressorSaturator {
         let sat_r = self.tape_sat.1.process_sample(comp_r);
 
         (sat_l, sat_r)
+    }
+
+    fn telemetry(&self) -> super::NodeTelemetry {
+        super::NodeTelemetry {
+            gain_reduction_db: self.current_gr_db,
+            ..Default::default()
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

@@ -1,5 +1,7 @@
 //! Preset Management for DeskDSP Control (Channel Strip and Master Chain configurations).
 
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;

@@ -168,4 +168,19 @@ impl DspNode for VocalCompressor {
 
         input * linear_gain
     }
+
+    fn telemetry(&self) -> super::NodeTelemetry {
+        super::NodeTelemetry {
+            gain_reduction_db: self.gain_reduction_db(),
+            ..Default::default()
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

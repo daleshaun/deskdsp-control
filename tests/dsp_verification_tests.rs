@@ -235,3 +235,157 @@ fn test_lufs_meter_two_stage_gating_and_no_allocations() {
     assert!(meter.max_true_peak_dbtp > -20.5 && meter.max_true_peak_dbtp < -19.5, "True Peak dBTP expected ~ -20 dBTP, got {}", meter.max_true_peak_dbtp);
 }
 
+#[test]
+fn test_dynamic_rack_default_order_and_bit_identical_bypass() {
+    use deskdsp_control::dsp::channel_strip::ChannelStrip;
+
+    let sample_rate = 48000.0_f32;
+    let mut cs = ChannelStrip::new(sample_rate);
+
+    // 1. Verify default tracking chain has exactly 7 nodes in tracking order
+    assert_eq!(cs.rack.len(), 7, "Default tracking chain must contain 7 nodes");
+    assert_eq!(cs.rack.get(0).unwrap().name(), "High-Pass Filter"); // HPF 80Hz
+    assert_eq!(cs.rack.get(1).unwrap().name(), "Noise Gate / Expander");
+    assert_eq!(cs.rack.get(2).unwrap().name(), "Vocal De-Esser");
+    assert_eq!(cs.rack.get(3).unwrap().name(), "4-Band Parametric EQ");
+    assert_eq!(cs.rack.get(4).unwrap().name(), "Vocal Compressor (Opto)");
+    assert_eq!(cs.rack.get(5).unwrap().name(), "Vocal Tuner");
+    assert_eq!(cs.rack.get(6).unwrap().name(), "Tube Saturation");
+
+    // 2. Set all nodes in rack to bypassed
+    for i in 0..cs.rack.len() {
+        cs.rack.set_bypassed(i, true);
+        assert!(cs.rack.is_bypassed(i));
+    }
+
+    // 3. Process test samples; when bypassed with unity gain, output must be bit-identical
+    let test_samples = [0.0_f32, 0.123456, -0.654321, 0.999, -0.999, 0.5];
+    for &sample in &test_samples {
+        let out = cs.process(sample);
+        assert_eq!(out, sample, "Bypassed rack output must be bit-identical to input");
+    }
+}
+
+#[test]
+fn test_rack_reorder_add_remove_no_panic() {
+    use deskdsp_control::dsp::rack::{MonoRack, StereoRack};
+    use deskdsp_control::dsp::saturation::Saturation;
+    use deskdsp_control::dsp::limiter::TruePeakLimiter;
+
+    let sample_rate = 48000.0_f32;
+
+    // Test MonoRack
+    let mut mono_rack = MonoRack::with_capacity(16);
+    assert_eq!(mono_rack.len(), 0);
+    assert!(mono_rack.is_empty());
+
+    mono_rack.push(Saturation::new(sample_rate));
+    mono_rack.push(Saturation::new(sample_rate));
+    mono_rack.push(Saturation::new(sample_rate));
+    assert_eq!(mono_rack.len(), 3);
+
+    // Swap and move nodes
+    mono_rack.swap(0, 2);
+    mono_rack.swap(10, 20); // Out-of-bounds swap must not panic
+    mono_rack.move_node(0, 2);
+    mono_rack.move_node(99, 0); // Out-of-bounds move must not panic
+
+    // Remove node
+    let removed = mono_rack.remove(1);
+    assert!(removed.is_some());
+    assert_eq!(mono_rack.len(), 2);
+    assert!(mono_rack.remove(99).is_none()); // Out-of-bounds remove returns None
+
+    // Insert node
+    mono_rack.insert(1, Box::new(Saturation::new(sample_rate)));
+    assert_eq!(mono_rack.len(), 3);
+
+    // Process sample through rack
+    let sample = 0.25_f32;
+    let proc = mono_rack.process(sample);
+    assert!(proc != 0.0 && !proc.is_nan());
+
+    // Test StereoRack
+    let mut stereo_rack = StereoRack::with_capacity(16);
+    assert_eq!(stereo_rack.len(), 0);
+    assert!(stereo_rack.is_empty());
+
+    stereo_rack.push(TruePeakLimiter::new(sample_rate));
+    stereo_rack.push(TruePeakLimiter::new(sample_rate));
+    assert_eq!(stereo_rack.len(), 2);
+
+    stereo_rack.swap(0, 1);
+    stereo_rack.swap(5, 6); // Out-of-bounds must not panic
+    assert_eq!(stereo_rack.len(), 2);
+
+    let (out_l, out_r) = stereo_rack.process_stereo(0.5, 0.5);
+    assert!(!out_l.is_nan() && !out_r.is_nan());
+}
+
+#[test]
+fn test_channel_strip_offthread_rack_swap_zero_allocation() {
+    use deskdsp_control::dsp::channel_strip::ChannelStrip;
+    use deskdsp_control::dsp::rack::MonoRack;
+    use deskdsp_control::dsp::saturation::Saturation;
+    use deskdsp_control::dsp::biquad::{BiquadFilter, FilterType};
+
+    let sample_rate = 48000.0_f32;
+    let mut cs = ChannelStrip::new(sample_rate);
+    assert_eq!(cs.rack.len(), 7);
+
+    // Construct a custom rack off-thread (e.g., UI or preset loader)
+    let mut custom_rack = MonoRack::with_capacity(16);
+    custom_rack.push(BiquadFilter::new(FilterType::LowPass, 5000.0, 0.0, sample_rate));
+    custom_rack.push(Saturation::new(sample_rate));
+
+    // Hot-swap the rack on the channel strip
+    let old_rack = cs.swap_rack(custom_rack);
+    assert_eq!(cs.rack.len(), 2);
+    assert_eq!(old_rack.len(), 7);
+
+    // Verify audio thread processing through the new rack
+    let initial_cap = cs.rack.nodes.capacity();
+    assert!(initial_cap >= 16);
+
+    for _ in 0..10_000 {
+        let _ = cs.process(0.1);
+    }
+
+    // Capacity must remain identical: 0 allocations occurred during process()
+    assert_eq!(cs.rack.nodes.capacity(), initial_cap);
+}
+
+#[test]
+fn test_master_chain_rack_operations_and_typed_downcast() {
+    use deskdsp_control::dsp::master_chain::MasterChain;
+    use deskdsp_control::dsp::limiter::TruePeakLimiter;
+    use deskdsp_control::dsp::master_eq::MasterEq;
+
+    let sample_rate = 48000.0_f32;
+    let mut master = MasterChain::new(sample_rate);
+
+    // 1. Verify default 6 mastering nodes in order
+    assert_eq!(master.rack.len(), 6);
+    assert_eq!(master.rack.get(0).unwrap().name(), "5-Band Master EQ");
+    assert_eq!(master.rack.get(1).unwrap().name(), "3-Band Multiband Compressor");
+    assert_eq!(master.rack.get(2).unwrap().name(), "Stereo Width / Mid-Side");
+    assert_eq!(master.rack.get(3).unwrap().name(), "Glue Compressor & Saturation");
+    assert_eq!(master.rack.get(4).unwrap().name(), "True-Peak Limiter (-1 dBTP)");
+    assert_eq!(master.rack.get(5).unwrap().name(), "EBU R128 Loudness Meter");
+
+    // 2. Safe typed downcast
+    assert!(master.rack.find_node::<TruePeakLimiter>().is_some());
+    assert!(master.rack.find_node::<MasterEq>().is_some());
+    assert!(master.rack.find_node_mut::<TruePeakLimiter>().is_some());
+
+    // 3. Bit-identical bypass check
+    for i in 0..master.rack.len() {
+        master.rack.set_bypassed(i, true);
+    }
+    let (l_in, r_in) = (0.33333_f32, -0.66666_f32);
+    let (l_out, r_out) = master.process_stereo(l_in, r_in);
+    assert_eq!(l_out, l_in);
+    assert_eq!(r_out, r_in);
+}
+
+

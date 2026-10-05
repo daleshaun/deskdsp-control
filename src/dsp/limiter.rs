@@ -4,6 +4,8 @@
 //! Employs 4x oversampled polyphase FIR interpolation over a lookahead window
 //! to detect and control inter-sample peaks before they reach downstream D/A converters.
 
+#![allow(dead_code)]
+
 use super::StereoDspNode;
 
 /// ITU-R BS.1770-4 Annex 2 Table 2 4x Oversampling Polyphase Interpolation Filter
@@ -169,5 +171,20 @@ impl StereoDspNode for TruePeakLimiter {
         out_r = out_r.clamp(-self.ceiling_linear, self.ceiling_linear);
 
         (out_l, out_r)
+    }
+
+    fn telemetry(&self) -> super::NodeTelemetry {
+        super::NodeTelemetry {
+            gain_reduction_db: self.current_gr_db,
+            ..Default::default()
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

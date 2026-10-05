@@ -109,4 +109,19 @@ impl DspNode for NoiseGate {
         self.current_gain += (target_gain - self.current_gain) * self.gain_coeff;
         input * self.current_gain
     }
+
+    fn telemetry(&self) -> super::NodeTelemetry {
+        super::NodeTelemetry {
+            gain_reduction_db: self.current_reduction_db(),
+            ..Default::default()
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

@@ -8,6 +8,8 @@
 //! - Integrated loudness with full two-stage gating (-70 LKFS absolute gate and -10 LU relative gate)
 //!   using a fixed-size ring buffer without any heap allocations or memory shifts in the audio loop.
 
+#![allow(dead_code)]
+
 use super::biquad::{BiquadFilter, FilterType};
 use super::limiter::calculate_true_peak_4x;
 
@@ -221,5 +223,45 @@ impl LufsMeter {
                 self.integrated_lufs = -100.0;
             }
         }
+    }
+}
+
+impl super::StereoDspNode for LufsMeter {
+    fn name(&self) -> &'static str {
+        "EBU R128 Loudness Meter"
+    }
+
+    fn is_bypassed(&self) -> bool {
+        false
+    }
+
+    fn set_bypassed(&mut self, _bypassed: bool) {}
+
+    fn reset(&mut self) {
+        LufsMeter::reset(self);
+    }
+
+    #[inline(always)]
+    fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
+        self.process_sample(left, right);
+        (left, right)
+    }
+
+    fn telemetry(&self) -> super::NodeTelemetry {
+        super::NodeTelemetry {
+            momentary_lufs: self.momentary_lufs,
+            short_term_lufs: self.short_term_lufs,
+            integrated_lufs: self.integrated_lufs,
+            true_peak_dbtp: self.max_true_peak_dbtp,
+            ..Default::default()
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
