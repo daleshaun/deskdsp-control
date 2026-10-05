@@ -1,6 +1,9 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::Duration;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use tower::ServiceExt; // for `oneshot`
 
 use deskdsp_control::audio::AudioMeters;
@@ -9,7 +12,7 @@ use deskdsp_control::remote::{LiveMetersState, OutputLevelsState, PreampChannelS
 #[tokio::test]
 async fn test_tablet_remote_serves_html_touch_ui() {
     let meters = Arc::new(AudioMeters::default());
-    let server = TabletRemoteServer::new(None, meters, 8080);
+    let server = TabletRemoteServer::new(None, meters, 8080, None);
     let app = server.router();
 
     let req = Request::builder()
@@ -47,7 +50,7 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
     AudioMeters::store_f32(&meters.master_limiter_gr_db, 1.2);
     AudioMeters::store_f32(&meters.integrated_lufs, -14.1);
 
-    let server = TabletRemoteServer::new(None, meters, 8080);
+    let server = TabletRemoteServer::new(None, meters, 8080, None);
 
     // 1. Test /api/status
     let status_req = Request::builder()
@@ -81,6 +84,139 @@ async fn test_tablet_remote_api_status_and_meters_endpoints() {
     assert!((meters_json["lim_gr_db"].as_f64().unwrap() - 1.2).abs() < 1e-3);
     assert!((meters_json["integrated_lufs"].as_f64().unwrap() - (-14.1)).abs() < 1e-3);
     assert!((meters_json["out_l_dbfs"].as_f64().unwrap() - (-3.01)).abs() < 0.1);
+}
+
+#[tokio::test]
+async fn test_tablet_remote_token_authentication_gate() {
+    let meters = Arc::new(AudioMeters::default());
+    let token = "studio-safe-key-99".to_string();
+    let server = TabletRemoteServer::new(None, meters, 8080, Some(token.clone()));
+
+    // 1. Unauthenticated request to /api/status -> 401 Unauthorized
+    let unauth_req = Request::builder()
+        .uri("/api/status")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(unauth_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. Wrong token in query -> 401 Unauthorized
+    let wrong_req = Request::builder()
+        .uri("/api/status?token=wrongpassword")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(wrong_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. Valid token via Query Parameter ?token=... -> 200 OK
+    let query_req = Request::builder()
+        .uri(format!("/api/status?token={token}"))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(query_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. Valid token via Authorization: Bearer <TOKEN> -> 200 OK
+    let bearer_req = Request::builder()
+        .uri("/api/status")
+        .method("GET")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(bearer_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 5. Valid token via X-Remote-Token header -> 200 OK
+    let custom_hdr_req = Request::builder()
+        .uri("/api/status")
+        .method("GET")
+        .header("x-remote-token", &token)
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(custom_hdr_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 6. Test /api/auth endpoint
+    let auth_valid = Request::builder()
+        .uri(format!("/api/auth?token={token}"))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let res = server.router().oneshot(auth_valid).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let auth_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(auth_json["authenticated"], true);
+    assert_eq!(auth_json["token_required"], true);
+}
+
+/// Verification test for the REAL startup path used in main.rs:
+/// A standard synchronous OS thread initializes Tokio, constructs the server
+/// inside `rt.block_on(async move { ... })`, binds to an actual TCP socket,
+/// and verifies HTTP responses over live wire TCP.
+#[test]
+fn test_tablet_remote_real_startup_thread_bind_and_respond() {
+    let (tx_ready, rx_ready) = std::sync::mpsc::channel();
+
+    let thread_handle = std::thread::Builder::new()
+        .name("test-remote-startup".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to initialize tokio runtime");
+            rt.block_on(async move {
+                let meters = Arc::new(AudioMeters::default());
+                // Construct inside rt.block_on exactly as main.rs does
+                let server = TabletRemoteServer::new(None, meters, 0, None);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("Failed to bind ephemeral test socket");
+                let bound_addr = listener.local_addr().expect("Failed to query local_addr");
+
+                // Signal readiness to caller test thread
+                tx_ready.send(bound_addr).expect("Failed to send bound addr");
+
+                let app = server.router();
+                axum::serve(listener, app).await.expect("Server serve error");
+            });
+        })
+        .expect("Failed to spawn test startup thread");
+
+    let bound_addr = rx_ready
+        .recv_timeout(Duration::from_secs(5))
+        .expect("Server failed to bind and signal readiness within 5 seconds");
+
+    // Connect via standard TCP and send a raw HTTP GET request to verify it is live and serving
+    let mut stream = TcpStream::connect(bound_addr)
+        .expect("Failed to connect to bound remote server socket");
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+    let raw_request = format!("GET /api/status HTTP/1.1\r\nHost: {bound_addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(raw_request.as_bytes()).unwrap();
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "Unexpected HTTP response: {response}");
+    assert!(response.contains(r#""status":"online""#));
+    assert!(response.contains(r#""sample_rate":48000"#));
+
+    // Also verify root index HTML is served over the live wire
+    let mut stream_html = TcpStream::connect(bound_addr)
+        .expect("Failed to connect for index HTML");
+    stream_html.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let raw_req_html = format!("GET / HTTP/1.1\r\nHost: {bound_addr}\r\nConnection: close\r\n\r\n");
+    stream_html.write_all(raw_req_html.as_bytes()).unwrap();
+
+    let mut html_response = String::new();
+    stream_html.read_to_string(&mut html_response).unwrap();
+    assert!(html_response.starts_with("HTTP/1.1 200 OK"));
+    assert!(html_response.contains("DeskDSP Remote"));
+    assert!(html_response.contains("ch1Fader"));
+
+    // Cleanup: thread terminates with test completion
+    drop(thread_handle);
 }
 
 #[test]

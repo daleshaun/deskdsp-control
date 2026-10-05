@@ -48,6 +48,10 @@ struct Args {
     /// Run only the wireless touch tablet remote server (headless daemon mode)
     #[arg(long)]
     remote_only: bool,
+
+    /// Optional access security token for the wireless tablet remote
+    #[arg(long)]
+    remote_token: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -151,15 +155,18 @@ fn main() -> Result<()> {
         let hw_remote = hw.clone();
         let meters_remote = Arc::clone(&audio.meters);
         let port = args.remote_port;
+        let token = args.remote_token.clone();
 
         std::thread::Builder::new()
             .name("tablet-remote-server".into())
             .spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to initialize tokio runtime");
-                let server = remote::TabletRemoteServer::new(hw_remote, meters_remote, port);
-                if let Err(e) = rt.block_on(server.run()) {
-                    eprintln!("Tablet remote server error: {e}");
-                }
+                rt.block_on(async move {
+                    let server = remote::TabletRemoteServer::new(hw_remote, meters_remote, port, token);
+                    if let Err(e) = server.run().await {
+                        eprintln!("Tablet remote server error: {e}");
+                    }
+                });
             })
             .expect("Failed to spawn tablet remote thread");
 

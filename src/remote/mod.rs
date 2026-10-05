@@ -3,29 +3,34 @@
 //! Architectural Guarantees:
 //! 1. Zero locks on the real-time audio thread: server only interacts with
 //!    `HardwareController` and lock-free atomic `AudioMeters`.
-//! 2. Coalesced HID writes: high-frequency touch scrub events (gain/volume)
-//!    are debounced and coalesced to prevent USB HID buffer congestion.
-//! 3. Hardware -> Tablet state sync: real-time 0x73 telemetry snapshots from Zen Go
+//! 2. Dedicated OS thread for HID writes: all blocking USB HID writes and mutex locks
+//!    are moved completely off the Tokio async executor, eliminating fader latency.
+//! 3. Shortened device-lock holds: HID reader holds lock for at most 5ms and yields.
+//! 4. Hardware -> Tablet state sync: real-time 0x73 telemetry snapshots from Zen Go
 //!    are pushed over WebSocket to all connected tablets.
-//! 4. Self-contained: embeds responsive tablet touch HTML5/CSS3 application.
+//! 5. Token authentication gate: optional `--remote-token` protecting WebSocket and REST APIs.
+//! 6. Self-contained: embeds responsive tablet touch HTML5/CSS3 application.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::Result;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
-    response::{Html, IntoResponse, Json},
+    http::{HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Json, Response},
     routing::get,
     Router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
-use crate::audio::{AudioMeters};
+use crate::audio::AudioMeters;
 use crate::hardware::HardwareController;
 use antelope_protocol::PreampMode;
 
@@ -86,7 +91,7 @@ pub struct LiveMetersState {
     pub lim_gr_db: f32,
 }
 
-/// Commands sent to the coalescing HID worker thread
+/// Commands sent to the dedicated coalescing HID worker OS thread
 #[derive(Debug, Clone)]
 enum CoalescedHidCommand {
     Gain { input: u8, val: u8 },
@@ -102,8 +107,10 @@ enum CoalescedHidCommand {
 struct AppState {
     hw: Option<HardwareController>,
     meters: Arc<AudioMeters>,
-    cmd_tx: mpsc::Sender<CoalescedHidCommand>,
+    cmd_tx: std::sync::mpsc::Sender<CoalescedHidCommand>,
     broadcast_tx: broadcast::Sender<String>,
+    token: Option<String>,
+    broadcast_started: AtomicBool,
 }
 
 pub struct TabletRemoteServer {
@@ -112,64 +119,45 @@ pub struct TabletRemoteServer {
 }
 
 impl TabletRemoteServer {
-    pub fn new(hw: Option<HardwareController>, meters: Arc<AudioMeters>, port: u16) -> Self {
-        let (cmd_tx, mut cmd_rx) = mpsc::channel::<CoalescedHidCommand>(128);
+    pub fn new(
+        hw: Option<HardwareController>,
+        meters: Arc<AudioMeters>,
+        port: u16,
+        token: Option<String>,
+    ) -> Self {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CoalescedHidCommand>();
         let (broadcast_tx, _) = broadcast::channel::<String>(64);
 
-        // 1. Dedicated Coalescing HID Worker
-        // Eliminates USB HID congestion under rapid touch fader scrubbing
+        // 1. Dedicated Coalescing HID Worker (Dedicated OS Thread)
+        // Moves all blocking USB HID writes and mutex locks completely off the Tokio
+        // async executor. High-frequency touch scrubbing (gain/volume) is coalesced at 50Hz,
+        // while discrete buttons (+48V, phase, mode, mute) execute immediately.
         let hw_clone = hw.clone();
-        tokio::spawn(async move {
-            let mut pending_gain: [Option<u8>; 2] = [None, None];
-            let mut pending_mon_vol: Option<u8> = None;
-            let mut pending_hp1_vol: Option<u8> = None;
-            let mut pending_hp2_vol: Option<u8> = None;
+        std::thread::Builder::new()
+            .name("tablet-hid-writer".into())
+            .spawn(move || {
+                let mut pending_gain: [Option<u8>; 2] = [None, None];
+                let mut pending_mon_vol: Option<u8> = None;
+                let mut pending_hp1_vol: Option<u8> = None;
+                let mut pending_hp2_vol: Option<u8> = None;
 
-            let mut interval = tokio::time::interval(Duration::from_millis(25)); // 40Hz write rate
+                let flush_interval = Duration::from_millis(20); // 50Hz write rate for rapid touch response
+                let mut last_flush = std::time::Instant::now();
 
-            loop {
-                tokio::select! {
-                    Some(cmd) = cmd_rx.recv() => {
-                        match cmd {
-                            CoalescedHidCommand::Gain { input, val } => {
-                                if (input as usize) < 2 {
-                                    pending_gain[input as usize] = Some(val);
-                                }
-                            }
-                            CoalescedHidCommand::MonitorVol { val } => {
-                                pending_mon_vol = Some(val);
-                            }
-                            CoalescedHidCommand::Hp1Vol { val } => {
-                                pending_hp1_vol = Some(val);
-                            }
-                            CoalescedHidCommand::Hp2Vol { val } => {
-                                pending_hp2_vol = Some(val);
-                            }
-                            // Discrete commands (buttons/toggles) execute immediately without waiting
-                            CoalescedHidCommand::Phantom { input, val } => {
-                                if let Some(h) = &hw_clone {
-                                    let _ = h.set_phantom(input, val);
-                                }
-                            }
-                            CoalescedHidCommand::Phase { input, val } => {
-                                if let Some(h) = &hw_clone {
-                                    let _ = h.set_phase(input, val);
-                                }
-                            }
-                            CoalescedHidCommand::Mode { input, mode } => {
-                                if let Some(h) = &hw_clone {
-                                    let _ = h.set_preamp_mode(input, mode);
-                                }
-                            }
-                            CoalescedHidCommand::MonitorMute { val } => {
-                                if let Some(h) = &hw_clone {
-                                    let _ = h.set_monitor_mute(val);
-                                }
+                loop {
+                    let timeout = flush_interval.saturating_sub(last_flush.elapsed());
+                    match cmd_rx.recv_timeout(timeout) {
+                        Ok(cmd) => {
+                            handle_hid_cmd(&hw_clone, cmd, &mut pending_gain, &mut pending_mon_vol, &mut pending_hp1_vol, &mut pending_hp2_vol);
+                            while let Ok(next) = cmd_rx.try_recv() {
+                                handle_hid_cmd(&hw_clone, next, &mut pending_gain, &mut pending_mon_vol, &mut pending_hp1_vol, &mut pending_hp2_vol);
                             }
                         }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
-                    _ = interval.tick() => {
-                        // Flush coalesced continuous values to hardware
+
+                    if last_flush.elapsed() >= flush_interval {
                         if let Some(h) = &hw_clone {
                             for ch in 0..2 {
                                 if let Some(g) = pending_gain[ch].take() {
@@ -186,15 +174,38 @@ impl TabletRemoteServer {
                                 let _ = h.set_hp2_volume(hp2);
                             }
                         }
+                        last_flush = std::time::Instant::now();
                     }
                 }
-            }
+            })
+            .expect("Failed to spawn tablet-hid-writer thread");
+
+        let state = Arc::new(AppState {
+            hw,
+            meters,
+            cmd_tx,
+            broadcast_tx,
+            token,
+            broadcast_started: AtomicBool::new(false),
         });
 
         // 2. Real-Time Hardware -> Tablet State Sync Broadcast Worker
-        let hw_sync = hw.clone();
-        let meters_sync = Arc::clone(&meters);
-        let bcast_tx = broadcast_tx.clone();
+        // If constructed inside a Tokio runtime, spawn the broadcast worker immediately.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            Self::spawn_broadcast_worker(&state);
+        }
+
+        Self { port, state }
+    }
+
+    fn spawn_broadcast_worker(state: &Arc<AppState>) {
+        if state.broadcast_started.swap(true, Ordering::SeqCst) {
+            return; // Already started
+        }
+
+        let hw_sync = state.hw.clone();
+        let meters_sync = Arc::clone(&state.meters);
+        let bcast_tx = state.broadcast_tx.clone();
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(50)); // 20Hz sync
@@ -262,21 +273,18 @@ impl TabletRemoteServer {
                 }
             }
         });
-
-        let state = Arc::new(AppState {
-            hw,
-            meters,
-            cmd_tx,
-            broadcast_tx,
-        });
-
-        Self { port, state }
     }
 
     pub fn router(&self) -> Router {
+        // Ensure broadcast worker is running if router is queried inside a runtime
+        if tokio::runtime::Handle::try_current().is_ok() {
+            Self::spawn_broadcast_worker(&self.state);
+        }
+
         Router::new()
             .route("/", get(index_handler))
             .route("/ws", get(ws_handler))
+            .route("/api/auth", get(auth_handler))
             .route("/api/status", get(status_handler))
             .route("/api/meters", get(meters_handler))
             .layer(tower_http::cors::CorsLayer::permissive())
@@ -284,12 +292,63 @@ impl TabletRemoteServer {
     }
 
     pub async fn run(self) -> Result<()> {
+        Self::spawn_broadcast_worker(&self.state);
         let app = self.router();
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let listener = tokio::net::TcpListener::bind(addr).await?;
         println!("📡 Wireless Touch Tablet Remote online: http://0.0.0.0:{}", self.port);
+        if self.state.token.is_some() {
+            println!("🔒 Remote access token protection: ACTIVE");
+        }
         axum::serve(listener, app).await?;
         Ok(())
+    }
+}
+
+fn handle_hid_cmd(
+    hw: &Option<HardwareController>,
+    cmd: CoalescedHidCommand,
+    pending_gain: &mut [Option<u8>; 2],
+    pending_mon_vol: &mut Option<u8>,
+    pending_hp1_vol: &mut Option<u8>,
+    pending_hp2_vol: &mut Option<u8>,
+) {
+    match cmd {
+        CoalescedHidCommand::Gain { input, val } => {
+            if (input as usize) < 2 {
+                pending_gain[input as usize] = Some(val);
+            }
+        }
+        CoalescedHidCommand::MonitorVol { val } => {
+            *pending_mon_vol = Some(val);
+        }
+        CoalescedHidCommand::Hp1Vol { val } => {
+            *pending_hp1_vol = Some(val);
+        }
+        CoalescedHidCommand::Hp2Vol { val } => {
+            *pending_hp2_vol = Some(val);
+        }
+        // Discrete toggles execute immediately on the dedicated OS thread without waiting
+        CoalescedHidCommand::Phantom { input, val } => {
+            if let Some(h) = hw {
+                let _ = h.set_phantom(input, val);
+            }
+        }
+        CoalescedHidCommand::Phase { input, val } => {
+            if let Some(h) = hw {
+                let _ = h.set_phase(input, val);
+            }
+        }
+        CoalescedHidCommand::Mode { input, mode } => {
+            if let Some(h) = hw {
+                let _ = h.set_preamp_mode(input, mode);
+            }
+        }
+        CoalescedHidCommand::MonitorMute { val } => {
+            if let Some(h) = hw {
+                let _ = h.set_monitor_mute(val);
+            }
+        }
     }
 }
 
@@ -316,21 +375,103 @@ fn default_fallback_state() -> (PreampChannelState, PreampChannelState, OutputLe
     )
 }
 
+fn is_authorized(
+    token_opt: &Option<String>,
+    query: &HashMap<String, String>,
+    headers: &HeaderMap,
+) -> bool {
+    let Some(expected) = token_opt else {
+        return true; // No token configured -> open access
+    };
+
+    if let Some(t) = query.get("token") {
+        if t == expected {
+            return true;
+        }
+    }
+
+    if let Some(auth) = headers.get("authorization").and_then(|h| h.to_str().ok()) {
+        if let Some(bearer) = auth.strip_prefix("Bearer ") {
+            if bearer.trim() == expected {
+                return true;
+            }
+        }
+    }
+
+    if let Some(custom) = headers.get("x-remote-token").and_then(|h| h.to_str().ok()) {
+        if custom.trim() == expected {
+            return true;
+        }
+    }
+
+    false
+}
+
 async fn index_handler() -> Html<&'static str> {
     Html(TABLET_TOUCH_HTML)
 }
 
-async fn status_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn auth_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_authorized(&state.token, &query, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "authenticated": false,
+                "token_required": true,
+                "error": "Unauthorized: invalid or missing remote token"
+            })),
+        )
+            .into_response();
+    }
+
+    Json(serde_json::json!({
+        "authenticated": true,
+        "token_required": state.token.is_some()
+    }))
+    .into_response()
+}
+
+async fn status_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_authorized(&state.token, &query, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Unauthorized: invalid or missing remote token"})),
+        )
+            .into_response();
+    }
+
     let hw_online = state.hw.is_some();
     Json(serde_json::json!({
         "status": "online",
         "hardware_detected": hw_online,
         "sample_rate": 48000,
-        "service": "DeskDSP Control Wireless Tablet Remote"
+        "service": "DeskDSP Control Wireless Tablet Remote",
+        "token_required": state.token.is_some()
     }))
+    .into_response()
 }
 
-async fn meters_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn meters_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_authorized(&state.token, &query, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Unauthorized: invalid or missing remote token"})),
+        )
+            .into_response();
+    }
+
     let in_l = AudioMeters::load_f32(&state.meters.in_l_peak);
     let in_r = AudioMeters::load_f32(&state.meters.in_r_peak);
     let out_l = AudioMeters::load_f32(&state.meters.out_l_peak);
@@ -350,13 +491,25 @@ async fn meters_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::
         "integrated_lufs": AudioMeters::load_f32(&state.meters.integrated_lufs),
         "tuner_freq_hz": AudioMeters::load_f32(&state.meters.tuner_detected_freq)
     }))
+    .into_response()
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if !is_authorized(&state.token, &query, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized: invalid or missing remote token",
+        )
+            .into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_tablet_socket(socket, state))
+        .into_response()
 }
 
 async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
@@ -376,13 +529,13 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     if let Ok(cmd) = serde_json::from_str::<RemoteMessage>(&text) {
                         match cmd {
                             RemoteMessage::SetGain { input, gain_db } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Gain { input, val: gain_db }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::Gain { input, val: gain_db });
                             }
                             RemoteMessage::SetPhantom { input, enabled } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Phantom { input, val: enabled }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::Phantom { input, val: enabled });
                             }
                             RemoteMessage::SetPhase { input, enabled } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Phase { input, val: enabled }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::Phase { input, val: enabled });
                             }
                             RemoteMessage::SetMode { input, mode } => {
                                 let m = match mode.as_str() {
@@ -391,19 +544,19 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     "HiZ" => PreampMode::HiZ,
                                     _ => PreampMode::Mic,
                                 };
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Mode { input, mode: m }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::Mode { input, mode: m });
                             }
                             RemoteMessage::SetMonitorVolume { step } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::MonitorVol { val: step }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::MonitorVol { val: step });
                             }
                             RemoteMessage::SetMonitorMute { enabled } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::MonitorMute { val: enabled }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::MonitorMute { val: enabled });
                             }
                             RemoteMessage::SetHp1Volume { step } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Hp1Vol { val: step }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::Hp1Vol { val: step });
                             }
                             RemoteMessage::SetHp2Volume { step } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Hp2Vol { val: step }).await;
+                                let _ = state.cmd_tx.send(CoalescedHidCommand::Hp2Vol { val: step });
                             }
                             _ => {}
                         }

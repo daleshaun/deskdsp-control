@@ -173,18 +173,23 @@ cargo run --release -- --remote
 # Launch on a custom port
 cargo run --release -- --remote --remote-port 9000
 
+# Protect remote access with a security token
+cargo run --release -- --remote --remote-token studio2026
+
 # Launch in headless daemon mode (remote-only, no terminal UI)
-cargo run --release -- --remote-only
+cargo run --release -- --remote-only --remote-token studio2026
 ```
 Connect any tablet on the same Wi-Fi network to:
-`http://<mac-ip>:8080`
+`http://<mac-ip>:8080` (or `http://<mac-ip>:8080/?token=studio2026`)
 
 ### Architectural Guarantees:
 1. **Zero Locks on the Real-Time Audio Path:** The remote server never acquires any locks on DSP chains or the audio thread. Peak/LUFS/GR meters are read directly from atomic float storage (`AudioMeters`) via lock-free bit manipulation.
-2. **Coalesced HID Writes:** Rapid touch scrubbing on continuous faders (preamp gain, monitor volume, headphone volumes) is debounced and coalesced at 40Hz (25ms intervals) to eliminate USB HID buffer congestion.
-3. **Instantaneous Discrete Controls:** High-priority discrete toggles (+48V phantom, phase invert, preamp mode `Mic`/`Line`/`HiZ`, monitor mute) execute immediately on the hardware controller without debounce delays.
-4. **Bidirectional Hardware-to-Tablet State Sync:** Real-time 0x73 HID telemetry frame snapshots from physical Zen Go knob turns or button presses are broadcast at 20Hz over WebSockets to all connected tablets, keeping the touch UI and physical hardware in sync.
-5. **Self-Contained Obsidian Touch Interface:** Embedded single-page application crafted with dark obsidian glassmorphism, responsive pointer captures, animated LED peak meters, and auto-reconnecting WebSockets.
+2. **Dedicated OS Thread for HID Writes (Off Async Executor):** All blocking USB HID writes and mutex locks are executed on a dedicated OS thread (`"tablet-hid-writer"`), completely off the Tokio async executor. Continuous touch fader scrubbing (gain, monitor vol, HP volumes) is coalesced at 50Hz (20ms intervals) for ultra-low latency tactile tracking without async scheduler contention.
+3. **Shortened Device-Lock Hold:** The background HID reader thread acquires the device lock with a shortened 5ms timeout and yields 1ms between frames, ensuring write threads acquire the device lock almost instantly (< 5ms max latency).
+4. **Instantaneous Discrete Controls:** High-priority discrete toggles (+48V phantom, phase invert, preamp mode `Mic`/`Line`/`HiZ`, monitor mute) execute immediately on the hardware controller without debounce delays.
+5. **Bidirectional Hardware-to-Tablet State Sync:** Real-time 0x73 HID telemetry frame snapshots from physical Zen Go knob turns or button presses are broadcast at 20Hz over WebSockets to all connected tablets, keeping the touch UI and physical hardware in sync.
+6. **Token Authentication Gate:** Optional `--remote-token` locks down WebSocket upgrades and REST endpoints (`/api/status`, `/api/meters`, `/api/auth`). Tablets can supply the token in the URL (`?token=...`), via headers (`Authorization: Bearer <TOKEN>` or `X-Remote-Token: <TOKEN>`), or enter it once via the built-in browser prompt.
+7. **Self-Contained Obsidian Touch Interface:** Embedded single-page application crafted with dark obsidian glassmorphism, responsive pointer captures, animated LED peak meters, and auto-reconnecting WebSockets.
 
 ---
 
@@ -232,7 +237,7 @@ Run the verification test suite:
 cargo test
 ```
 
-### 21 Verified Offline Test Cases:
+### 23 Verified Offline Test Cases:
 1. **RBJ Biquad Coefficients:** Validates high-pass, low-shelf, peaking, and high-shelf filter coefficients against Robert Bristow-Johnson's Audio EQ Cookbook formulas.
 2. **Bit-Identical Bypass Guarantee:** Proves every DSP node passes audio bit-identically (`sample_in == sample_out`) when bypassed.
 3. **Compressor Transfer Curves:** Measures soft-knee threshold and gain reduction curves against mathematical expectations.
@@ -254,5 +259,7 @@ cargo test
 19. **Tablet Remote Embedded Touch UI:** Verifies serving self-contained HTML5/CSS3 touch workstation with pointer captures and faders.
 20. **Tablet Remote Status & Live Meters REST API:** Validates lock-free reading of atomic peak, LUFS, and gain reduction levels over HTTP.
 21. **Tablet Remote Protocol Serde:** Validates serialization and deserialization across all WebSocket hardware control messages.
+22. **Tablet Remote Token Authentication Gate:** Validates token enforcement across query params, Bearer auth, custom headers, and rejection of unauthenticated access.
+23. **Tablet Remote Real Startup Thread & Wire Binding:** Exercises the exact startup sequence used by `main.rs` (spawning a standard OS thread, initializing Tokio runtime, constructing server inside `rt.block_on`, binding to a TCP port, and serving live HTTP wire requests).
 
 

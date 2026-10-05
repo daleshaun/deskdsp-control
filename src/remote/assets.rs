@@ -524,9 +524,22 @@ pub const TABLET_TOUCH_HTML: &str = r#"<!DOCTYPE html>
       outputs: { monitor_step: 32, monitor_mute: false, hp1_step: 32, hp2_step: 32 }
     };
 
+    function getToken() {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get('token') || sessionStorage.getItem('deskdsp_token') || '';
+    }
+
+    function setToken(tok) {
+      sessionStorage.setItem('deskdsp_token', tok);
+      const url = new URL(window.location);
+      url.searchParams.set('token', tok);
+      window.history.replaceState({}, '', url);
+    }
+
     function connectWebSocket() {
+      const token = getToken();
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${location.host}/ws`;
+      const url = `${proto}//${location.host}/ws` + (token ? `?token=${encodeURIComponent(token)}` : '');
       socket = new WebSocket(url);
 
       socket.onopen = () => {
@@ -534,9 +547,24 @@ pub const TABLET_TOUCH_HTML: &str = r#"<!DOCTYPE html>
         document.getElementById('statusText').textContent = 'ONLINE (WIFI)';
       };
 
-      socket.onclose = () => {
+      socket.onclose = async () => {
         document.getElementById('statusPill').classList.add('offline');
-        document.getElementById('statusText').textContent = 'DISCONNECTED';
+        try {
+          const res = await fetch('/api/auth' + (token ? `?token=${encodeURIComponent(token)}` : ''));
+          if (res.status === 401) {
+            document.getElementById('statusText').textContent = 'AUTH REQUIRED';
+            const entered = prompt('DeskDSP Remote: Enter access security token:');
+            if (entered) {
+              setToken(entered);
+              setTimeout(connectWebSocket, 300);
+              return;
+            }
+          } else {
+            document.getElementById('statusText').textContent = 'DISCONNECTED';
+          }
+        } catch (e) {
+          document.getElementById('statusText').textContent = 'DISCONNECTED';
+        }
         setTimeout(connectWebSocket, 1500);
       };
 

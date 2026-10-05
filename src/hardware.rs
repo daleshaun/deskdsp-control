@@ -51,7 +51,8 @@ impl HardwareController {
             loop {
                 let read_res = {
                     if let Ok(dev) = dev_clone.lock() {
-                        dev.read_timeout(&mut buf, 50)
+                        // Short 5ms timeout so writes from the tablet or UI never wait on long lock holds
+                        dev.read_timeout(&mut buf, 5)
                     } else {
                         break;
                     }
@@ -69,9 +70,12 @@ impl HardwareController {
                     }
                     Ok(_) => {}
                     Err(_) => {
-                        thread::sleep(Duration::from_millis(50));
+                        thread::sleep(Duration::from_millis(5));
                     }
                 }
+
+                // Yield 1ms between reads to give writing threads immediate, uncontested lock acquisition
+                thread::sleep(Duration::from_millis(1));
             }
         });
 
