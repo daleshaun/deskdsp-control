@@ -15,26 +15,33 @@ pub struct VocalTuner {
     pub detector: PitchDetector,
     pub quantizer: ScaleQuantizer,
     pub shifter: PitchShifter,
-    
+
     // Parameters
     pub retune_speed_ms: f32,
     pub strength: f32,
     pub bypassed: bool,
-    
+
     // Telemetry for UI / Monitoring
     pub detected_freq_hz: Option<f32>,
     pub target_freq_hz: Option<f32>,
     pub cents_deviation: f32,
     pub current_note: &'static str,
     pub confidence: f32,
-    
+
+    sample_rate: f32,
     frame_counter: usize,
     hop_size: usize,
 
-    // Confidence gating & clean dry/wet passthrough
-    wet_mix: f32,
-    target_mix: f32,
-    mix_coeff: f32,
+    // Signal level tracking (smooth RMS/peak envelope)
+    rms_env: f32,
+
+    // 3-point median filter on detected frequency for rock-solid stability
+    pitch_history: [f32; 3],
+    history_idx: usize,
+    history_count: usize,
+
+    // Voiced tracking state
+    voiced_counter: usize,
 }
 
 impl VocalTuner {
@@ -51,11 +58,14 @@ impl VocalTuner {
             cents_deviation: 0.0,
             current_note: "--",
             confidence: 0.0,
+            sample_rate,
             frame_counter: 0,
             hop_size: 128,         // pitch analysis hop size (~2.6ms at 48kHz)
-            wet_mix: 0.0,
-            target_mix: 0.0,
-            mix_coeff: 1.0 - (-1.0 / (0.010 * sample_rate)).exp(), // ~10ms smooth crossfade
+            rms_env: 0.0,
+            pitch_history: [0.0; 3],
+            history_idx: 0,
+            history_count: 0,
+            voiced_counter: 0,
         }
     }
 
@@ -91,6 +101,9 @@ impl DspNode for VocalTuner {
         self.current_note = "--";
         self.confidence = 0.0;
         self.frame_counter = 0;
+        self.rms_env = 0.0;
+        self.history_count = 0;
+        self.voiced_counter = 0;
     }
 
     #[inline(always)]
@@ -101,6 +114,12 @@ impl DspNode for VocalTuner {
 
         // Push to pitch detection buffer
         self.detector.push_sample(input);
+
+        // Smooth signal envelope follower to avoid zero-crossing dropouts
+        let abs_in = input.abs();
+        let coeff = if abs_in > self.rms_env { 0.05 } else { 0.001 };
+        self.rms_env += (abs_in - self.rms_env) * coeff;
+
         self.frame_counter += 1;
 
         // Perform periodic pitch detection hop
@@ -109,40 +128,61 @@ impl DspNode for VocalTuner {
             let (pitch_opt, conf) = self.detector.detect_pitch();
             self.confidence = conf;
 
-            if let Some(f_in) = pitch_opt {
-                // High confidence (>0.78) and signal level required to prevent false triggering on polyphonic music
-                if conf > 0.78 && input.abs() > 0.002 {
-                    let (f_target, note_str, cents) = self.quantizer.quantize(f_in);
+            let signal_present = self.rms_env > 0.003; // > -50 dBFS
+
+            if let Some(raw_f) = pitch_opt {
+                if conf >= 0.70 && signal_present && raw_f >= 75.0 && raw_f <= 900.0 {
+                    // Push to 3-point median filter for outlier rejection
+                    self.pitch_history[self.history_idx] = raw_f;
+                    self.history_idx = (self.history_idx + 1) % 3;
+                    if self.history_count < 3 {
+                        self.history_count += 1;
+                    }
+
+                    let f_in = if self.history_count >= 3 {
+                        let mut sorted = self.pitch_history;
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        sorted[1]
+                    } else {
+                        raw_f
+                    };
+
+                    let (f_target, note_str, cents) = self.quantizer.quantize_with_hysteresis(f_in);
                     self.detected_freq_hz = Some(f_in);
                     self.target_freq_hz = Some(f_target);
                     self.cents_deviation = cents;
                     self.current_note = note_str;
 
-                    // Compute correction ratio
-                    let ideal_ratio = f_target / f_in;
-                    // Blend with strength
+                    // Musical correction ratio (clamped to +/- 2.5 semitones)
+                    let ideal_ratio = (f_target / f_in).clamp(0.85, 1.18);
                     let effective_ratio = 1.0 + (ideal_ratio - 1.0) * self.strength;
+
                     self.shifter.set_ratio(effective_ratio, self.retune_speed_ms);
-                    self.target_mix = 1.0;
+                    self.shifter.set_pitch_period(self.sample_rate / f_in);
+                    self.voiced_counter = 0;
                 } else {
-                    // Low confidence / unvoiced / polyphonic music
-                    self.shifter.set_ratio(1.0, 5.0);
-                    self.target_mix = 0.0;
+                    self.voiced_counter += 1;
+                    if self.voiced_counter > 4 { // ~10ms unvoiced debounce
+                        self.shifter.set_ratio(1.0, 15.0);
+                        self.current_note = "--";
+                        self.cents_deviation = 0.0;
+                        self.history_count = 0;
+                    }
                 }
             } else {
-                self.shifter.set_ratio(1.0, 5.0);
-                self.target_mix = 0.0;
+                self.voiced_counter += 1;
+                if self.voiced_counter > 4 {
+                    self.shifter.set_ratio(1.0, 15.0);
+                    self.current_note = "--";
+                    self.cents_deviation = 0.0;
+                    self.history_count = 0;
+                }
             }
         }
 
-        self.wet_mix += (self.target_mix - self.wet_mix) * self.mix_coeff;
-        if self.wet_mix < 0.002 {
-            // Direct, transparent, bit-identical passthrough! Zero delay, zero grain smearing.
-            return input;
-        }
-
-        let wet = self.shifter.process_sample(input);
-        input * (1.0 - self.wet_mix) + wet * self.wet_mix
+        // Continuous delay line processing: clean, bit-perfect passthrough at ratio 1.0,
+        // and artifact-free pitch modification when retuned.
+        self.shifter.process_sample(input)
     }
 
     fn telemetry(&self) -> super::NodeTelemetry {

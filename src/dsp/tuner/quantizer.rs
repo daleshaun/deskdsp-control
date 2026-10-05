@@ -84,11 +84,12 @@ impl Scale {
 pub struct ScaleQuantizer {
     pub root: Note,
     pub scale: Scale,
+    pub last_target_midi: Option<i32>,
 }
 
 impl ScaleQuantizer {
     pub fn new(root: Note, scale: Scale) -> Self {
-        Self { root, scale }
+        Self { root, scale, last_target_midi: None }
     }
 
     #[inline(always)]
@@ -101,9 +102,8 @@ impl ScaleQuantizer {
         440.0 * 2.0_f32.powf((midi - 69.0) / 12.0)
     }
 
-    /// Quantizes input frequency to the closest note in the selected scale.
-    /// Returns (target_freq_hz, note_name, cents_deviation).
-    pub fn quantize(&self, freq: f32) -> (f32, &'static str, f32) {
+    /// Quantizes input frequency with hysteresis to prevent note flutter near scale boundaries.
+    pub fn quantize_with_hysteresis(&mut self, freq: f32) -> (f32, &'static str, f32) {
         if freq <= 10.0 {
             return (freq, "--", 0.0);
         }
@@ -113,7 +113,6 @@ impl ScaleQuantizer {
         let scale_mask = self.scale.mask();
         let root_offset = self.root as i32;
 
-        // Search closest allowed note in the scale mask
         let mut best_midi = rounded_midi;
         let mut min_distance = 999.0_f32;
 
@@ -129,10 +128,30 @@ impl ScaleQuantizer {
             }
         }
 
+        // Hysteresis: stick with the previous note unless the new candidate is > 20 cents closer
+        if let Some(prev) = self.last_target_midi {
+            let prev_in_scale = (prev - root_offset).rem_euclid(12) as usize;
+            if scale_mask[prev_in_scale] {
+                let prev_dist = (prev as f32 - midi).abs();
+                if prev_dist < 0.70 && prev_dist <= min_distance + 0.20 {
+                    best_midi = prev;
+                }
+            }
+        }
+
+        self.last_target_midi = Some(best_midi);
         let target_freq = Self::midi_to_freq(best_midi as f32);
         let cents = 1200.0 * (freq / target_freq).log2();
         let note = Note::from_semitone(best_midi.rem_euclid(12) as u32);
 
         (target_freq, note.name(), cents)
+    }
+
+    /// Quantizes input frequency to the closest note in the selected scale.
+    /// Returns (target_freq_hz, note_name, cents_deviation).
+    pub fn quantize(&self, freq: f32) -> (f32, &'static str, f32) {
+        let mut clone = self.clone();
+        clone.last_target_midi = None;
+        clone.quantize_with_hysteresis(freq)
     }
 }

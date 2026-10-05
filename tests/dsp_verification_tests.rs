@@ -525,6 +525,49 @@ fn test_lv2_host_scanning_instantiation_and_rack_integration() {
     assert!(!out_l.is_nan() && !out_r.is_nan());
 }
 
+#[test]
+fn test_vocal_tuner_audio_smoothness_and_glitch_free_processing() {
+    use deskdsp_control::dsp::tuner::VocalTuner;
+    let sample_rate = 48000.0_f32;
+    let mut tuner = VocalTuner::new(sample_rate);
+    tuner.set_bypassed(false);
+    tuner.set_tuning_params(15.0, 1.0); // 15ms retune speed, 100% correction
+    tuner.set_key_and_scale(Note::A, Scale::NaturalMinor);
+
+    // 1. Synthesize 200ms of vocal tone at 225 Hz (sharp of A3 = 220 Hz)
+    let freq = 225.0_f32;
+    let num_samples = (sample_rate * 0.2) as usize;
+    let mut prev_sample = 0.0_f32;
+    let mut max_slew = 0.0_f32;
+
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate;
+        let input = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.7;
+        let out = tuner.process_sample(input);
+
+        assert!(!out.is_nan() && !out.is_infinite(), "Output must be finite");
+        assert!(out.abs() <= 1.5, "Output bounded without explosion");
+
+        if i > 500 { // allow buffer warmup
+            let slew = (out - prev_sample).abs();
+            if slew > max_slew {
+                max_slew = slew;
+            }
+        }
+        prev_sample = out;
+    }
+
+    // Maximum sample-to-sample step for a 220Hz sine wave at 48kHz with 0.7 amplitude
+    // is ~ 2*pi*225/48000 * 0.7 ~= 0.02.
+    // Discontinuous jumps/pops/clicks would produce slews > 0.3.
+    assert!(max_slew < 0.25, "Pitch shifter produced discontinuous click/pop! Max slew: {}", max_slew);
+
+    // Verify it correctly locked and tuned to A3 (220 Hz)
+    assert_eq!(tuner.current_note, "A");
+    assert_relative_eq!(tuner.target_freq_hz.unwrap_or(0.0), 220.0, epsilon = 0.5);
+}
+
+
 
 
 
