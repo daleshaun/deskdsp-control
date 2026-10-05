@@ -97,6 +97,10 @@
     box-shadow:0 0 12px rgba(177,71,61,.6), 0 1px 0 rgba(255,255,255,.18) inset, 0 0 0 1px #591f19;}
   .bg.amb.on{color:#2c2510;background:linear-gradient(180deg,#f0bd5f,#c98a24);
     box-shadow:0 0 12px rgba(230,173,74,.6), 0 1px 0 rgba(255,255,255,.3) inset, 0 0 0 1px #7e5c16;}
+  .bg.active{color:#e3f6e8;background:linear-gradient(180deg,#52b06e,#2f7d49);
+    box-shadow:0 0 14px rgba(79,165,108,.65), 0 1px 0 rgba(255,255,255,.25) inset, 0 0 0 1px #1f5531;}
+  .bg.byp{color:#2c2510;background:linear-gradient(180deg,#f0bd5f,#c98a24);
+    box-shadow:0 0 14px rgba(230,173,74,.7), 0 1px 0 rgba(255,255,255,.3) inset, 0 0 0 1px #7e5c16;}
   .inled{width:100%;height:12px;border-radius:4px;overflow:hidden;position:relative;
     background:linear-gradient(180deg,#09080b,#15141a);box-shadow:0 0 0 1px #000, 0 0 8px rgba(0,0,0,.6) inset;}
   .inled>i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--grn),var(--amber) 78%,var(--red));
@@ -105,6 +109,12 @@
   .mon{width:292px;flex:0 0 auto}
   .fds{display:flex;justify-content:space-around;padding:14px 8px 10px;gap:4px}
   .fd{display:flex;flex-direction:column;align-items:center;gap:9px}
+  .fdrow{display:flex;align-items:flex-end;gap:6px}
+  .omtr{width:10px;height:196px;border-radius:4px;overflow:hidden;position:relative;
+    display:flex;flex-direction:column-reverse;
+    background:linear-gradient(180deg,#09080b,#15141a);box-shadow:0 0 0 1px #000, 0 0 6px rgba(0,0,0,.6) inset;}
+  .omtr>i{display:block;width:100%;height:0%;background:linear-gradient(0deg,var(--grn),var(--amber) 80%,var(--red));
+    box-shadow:0 0 6px rgba(120,200,120,.4);transition:height .07s linear}
   .fader{width:54px;height:196px;border-radius:7px;position:relative;
     background:linear-gradient(90deg,#1b1a20,#2e2d35);
     box-shadow:0 0 0 1px #000, 0 8px 16px rgba(0,0,0,.45), 0 0 12px rgba(0,0,0,.6) inset;}
@@ -176,9 +186,9 @@
     <div class="panel mon">
       <div class="lbl"><span>MONITOR</span><span class="tiny" id="muteTag">—</span></div>
       <div class="fds">
-        <div class="fd"><div class="fader" data-fader="mon"><div class="trk"></div><div class="cap"></div></div><div class="fl">MON</div><div class="fv" data-fv="mon">—</div></div>
-        <div class="fd"><div class="fader" data-fader="hp1"><div class="trk"></div><div class="cap"></div></div><div class="fl">HP 1</div><div class="fv" data-fv="hp1">—</div></div>
-        <div class="fd"><div class="fader" data-fader="hp2"><div class="trk"></div><div class="cap"></div></div><div class="fl">HP 2</div><div class="fv" data-fv="hp2">—</div></div>
+        <div class="fd"><div class="fdrow"><div class="omtr" data-om="mon"><i></i></div><div class="fader" data-fader="mon"><div class="trk"></div><div class="cap"></div></div></div><div class="fl">MON</div><div class="fv" data-fv="mon">—</div></div>
+        <div class="fd"><div class="fdrow"><div class="omtr" data-om="hp1"><i></i></div><div class="fader" data-fader="hp1"><div class="trk"></div><div class="cap"></div></div></div><div class="fl">HP 1</div><div class="fv" data-fv="hp1">—</div></div>
+        <div class="fd"><div class="fdrow"><div class="omtr" data-om="hp2"><i></i></div><div class="fader" data-fader="hp2"><div class="trk"></div><div class="cap"></div></div></div><div class="fl">HP 2</div><div class="fv" data-fv="hp2">—</div></div>
       </div>
       <div style="display:flex;justify-content:center;padding:0 0 14px"><span class="bg" data-tog="mute" style="min-width:120px">DIM / MUTE</span></div>
     </div>
@@ -311,7 +321,7 @@ document.querySelector('[data-tog="mute"]').addEventListener("click",function(){
 // Global DSP bypass toggle (header). Bypassed = signal passes clean, no processing.
 let dspBypassed=false;
 const bypassBtn=document.getElementById("bypass");
-function renderBypass(){bypassBtn.classList.toggle("on",dspBypassed);bypassBtn.textContent=dspBypassed?"DSP · BYPASS":"DSP · ACTIVE";}
+function renderBypass(){bypassBtn.classList.toggle("byp",dspBypassed);bypassBtn.classList.toggle("active",!dspBypassed);bypassBtn.textContent=dspBypassed?"DSP · BYPASS":"DSP · ACTIVE";}
 bypassBtn.addEventListener("click",()=>{dspBypassed=!dspBypassed;renderBypass();wsSend({type:"set_global_bypass",enabled:dspBypassed});});
 renderBypass();
 
@@ -325,7 +335,12 @@ function onMsg(s){if(s.type!=="state_sync")return;
   if(s.meters){paintMeter("inL",s.meters.in_l_dbfs);paintMeter("inR",s.meters.in_r_dbfs);
     paintMeter("outL",s.meters.out_l_dbfs);paintMeter("outR",s.meters.out_r_dbfs);
     paintGR("comp",s.meters.comp_gr_db);paintGR("lim",s.meters.lim_gr_db);
-    setInLed(1,s.meters.in_l_dbfs);setInLed(2,s.meters.in_r_dbfs);}}
+    setInLed(1,s.meters.in_l_dbfs);setInLed(2,s.meters.in_r_dbfs);
+    // per-output level = program output peak, attenuated by each output's own fader
+    const prog=Math.max(s.meters.out_l_dbfs,s.meters.out_r_dbfs);
+    paintOut("mon",prog);paintOut("hp1",prog);paintOut("hp2",prog);}}
+function paintOut(key,programDb){const step=fader[key]?fader[key].step:0;const db=programDb-step;
+  const i=document.querySelector(`.omtr[data-om="${key}"] > i`);if(i)i.style.height=clamp((db+60)/60*100,0,100)+"%";}
 function setInLed(n,dbfs){const i=document.querySelector(`[data-meter="${n}"]`);if(i)i.style.width=clamp((dbfs+60)/60*100,0,100)+"%";}
 function applyChan(n,c){if(!c)return;const m=modeKey(c.mode);
   if(m&&GAIN_RANGE[m]&&!ch[n].drag){ch[n].mode=m;renderMode(n);}
