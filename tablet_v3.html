@@ -135,6 +135,24 @@
     background:var(--amber);transform:translateY(-50%);border-radius:2px;box-shadow:0 0 7px rgba(230,173,74,.8);}
   .fl{font-size:10px;font-weight:800;letter-spacing:1px;text-shadow:0 1px 0 rgba(0,0,0,.6)}
   .fv{font-size:11px;color:var(--amber);font-weight:700}
+  /* tabs + processing */
+  .tabs{display:flex;gap:7px;padding:2px 10px 0}
+  .tab{font-size:12px;font-weight:800;letter-spacing:1.5px;color:var(--muted);padding:9px 20px;border-radius:9px 9px 0 0;cursor:pointer;
+    background:linear-gradient(180deg,#2b2a31,#201f25);box-shadow:0 1px 0 rgba(255,255,255,.04) inset;}
+  .tab.on{color:var(--cream);background:linear-gradient(180deg,#44424c,#322f38);box-shadow:0 -3px 10px rgba(0,0,0,.4);}
+  .chsel{display:flex;gap:8px;align-items:center;padding:4px 2px 12px}
+  .chsel .ttl{color:var(--muted);font-size:10px;letter-spacing:2px;font-weight:800;margin-right:auto}
+  .prow{display:flex;gap:12px;align-items:stretch;margin-bottom:12px}
+  .fx{flex:1;min-width:0}
+  .fx .in{padding:12px 10px 14px;display:flex;flex-direction:column;align-items:center;gap:8px}
+  .fxrow{display:flex;gap:10px;justify-content:space-around;width:100%}
+  .dctl{display:flex;flex-direction:column;align-items:center;gap:3px;width:92px}
+  .dknob{width:84px;height:84px;position:relative}
+  .dv{color:var(--amber);font-weight:800;font-size:15px;text-shadow:0 0 8px rgba(230,173,74,.35)}
+  .dt{color:var(--muted);font-size:8.5px;letter-spacing:1.5px;font-weight:700}
+  .lufs{display:flex;gap:20px;justify-content:center;padding:10px 0}
+  .lufs .n{color:var(--cream);font-weight:800;font-size:20px;text-align:center}
+  .lufs .l{color:var(--muted);font-size:8.5px;letter-spacing:1.5px;font-weight:700;text-align:center;margin-top:3px}
   svg{display:block}
 </style>
 </head>
@@ -148,7 +166,11 @@
       <div class="conn off" id="conn"><span class="dot"></span><span id="connTxt">OFFLINE</span></div>
     </div>
   </div>
-  <div class="bay">
+  <div class="tabs">
+    <span class="tab on" data-view="control">CONTROL</span>
+    <span class="tab" data-view="processing">PROCESSING</span>
+  </div>
+  <div id="view-control"><div class="bay">
     <div class="panel bridge">
       <div class="lbl"><span>PROGRAM · LIVE</span><span class="tiny" id="srTag">—</span></div>
       <div class="in">
@@ -197,6 +219,45 @@
         <div class="fd"><div class="fdrow"><div class="omtr" data-om="hp2"><i></i></div><div class="fader" data-fader="hp2"><div class="trk"></div><div class="cap"></div></div></div><div class="fl">HP 2</div><div class="fv" data-fv="hp2">—</div></div>
       </div>
       <div style="display:flex;justify-content:center;padding:0 0 14px"><span class="bg" data-tog="mute" style="min-width:120px">DIM / MUTE</span></div>
+    </div>
+  </div></div>
+
+  <div id="view-processing" style="display:none">
+    <div class="chsel">
+      <span class="ttl">CHANNEL STRIP — selected channel</span>
+      <span class="bg on" data-selch="ch1">CH 1 · VOX</span>
+      <span class="bg" data-selch="ch2">CH 2 · GTR</span>
+    </div>
+    <div class="prow">
+      <div class="panel fx"><div class="lbl"><span>GATE</span></div><div class="in"><div class="fxrow">
+        <div class="dctl" data-dsp='{"group":"chsel","param":"gate_threshold","min":-80,"max":0,"unit":"dB"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">THRESH</div></div>
+      </div></div></div>
+      <div class="panel fx"><div class="lbl"><span>COMPRESSOR</span></div><div class="in"><div class="fxrow">
+        <div class="dctl" data-dsp='{"group":"chsel","param":"comp_threshold","min":-40,"max":0,"unit":"dB"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">THRESH</div></div>
+        <div class="dctl" data-dsp='{"group":"chsel","param":"comp_ratio","min":1,"max":20,"unit":":1"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">RATIO</div></div>
+      </div></div></div>
+      <div class="panel fx"><div class="lbl"><span>SATURATION</span></div><div class="in"><div class="fxrow">
+        <div class="dctl" data-dsp='{"group":"chsel","param":"sat_drive","min":1,"max":5,"unit":"x"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">DRIVE</div></div>
+      </div></div></div>
+      <div class="panel fx"><div class="lbl"><span>TUNER</span></div><div class="in" style="justify-content:center;gap:10px;min-height:150px">
+        <div class="btns"><span class="bg on" data-scale="Chromatic">CHROM</span></div>
+        <div class="btns"><span class="bg" data-scale="Major">MAJOR</span><span class="bg" data-scale="NaturalMinor">MINOR</span></div>
+      </div></div>
+    </div>
+    <div class="prow">
+      <div class="panel fx"><div class="lbl"><span>GLUE COMP</span></div><div class="in"><div class="fxrow">
+        <div class="dctl" data-dsp='{"group":"master","param":"glue_threshold","min":-40,"max":0,"unit":"dB"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">THRESH</div></div>
+      </div></div></div>
+      <div class="panel fx"><div class="lbl"><span>STEREO WIDTH</span></div><div class="in"><div class="fxrow">
+        <div class="dctl" data-dsp='{"group":"master","param":"stereo_width","min":0,"max":2,"unit":"x"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">WIDTH</div></div>
+      </div></div></div>
+      <div class="panel fx"><div class="lbl"><span>LIMITER</span></div><div class="in"><div class="fxrow">
+        <div class="dctl" data-dsp='{"group":"master","param":"limiter_ceiling","min":-12,"max":0,"unit":"dBTP"}'><div class="dknob"></div><div class="dv">—</div><div class="dt">CEILING</div></div>
+      </div></div></div>
+      <div class="panel fx"><div class="lbl"><span>LOUDNESS</span></div><div class="in" style="justify-content:center;min-height:150px"><div class="lufs">
+        <div><div class="n" id="lufsVal">—</div><div class="l">LUFS INT</div></div>
+        <div><div class="n" id="tpVal">—</div><div class="l">TRUE PK</div></div>
+      </div></div></div>
     </div>
   </div>
 </div>
@@ -347,7 +408,9 @@ function onMsg(s){if(s.type!=="state_sync")return;
     setInLed(1,s.meters.in_l_dbfs);setInLed(2,s.meters.in_r_dbfs);
     // per-output level = program output peak, attenuated by each output's own fader
     const prog=Math.max(s.meters.out_l_dbfs,s.meters.out_r_dbfs);
-    paintOut("mon",prog);paintOut("hp1",prog);paintOut("hp2",prog);}}
+    paintOut("mon",prog);paintOut("hp1",prog);paintOut("hp2",prog);
+    const lu=document.getElementById("lufsVal");if(lu&&typeof s.meters.integrated_lufs==="number")lu.textContent=s.meters.integrated_lufs.toFixed(1);
+    const tp=document.getElementById("tpVal");if(tp&&typeof s.meters.true_peak_dbtp==="number")tp.textContent=s.meters.true_peak_dbtp.toFixed(1);}}
 function paintOut(key,programDb){const step=fader[key]?fader[key].step:0;const db=programDb-step;
   const i=document.querySelector(`.omtr[data-om="${key}"] > i`);if(i)i.style.height=clamp((db+60)/60*100,0,100)+"%";}
 function setInLed(n,dbfs){const i=document.querySelector(`[data-meter="${n}"]`);if(i)i.style.width=clamp((dbfs+60)/60*100,0,100)+"%";}
@@ -361,6 +424,45 @@ function applyFader(key,step){if(typeof step!=="number"||fader[key].drag)return;
 
 renderMode(1);renderMode(2);renderGain(1);renderGain(2);
 document.querySelectorAll("[data-fader]").forEach(f=>f._place(0));
+
+// ===== PROCESSING tab (DSP params) =====
+const dspState={
+  ch1:{gate_threshold:-45,comp_threshold:-18,comp_ratio:3,sat_drive:2},
+  ch2:{gate_threshold:-45,comp_threshold:-18,comp_ratio:3,sat_drive:2},
+  master:{glue_threshold:-15,stereo_width:1,limiter_ceiling:-1}
+};
+let selCh="ch1";
+document.querySelectorAll(".tab").forEach(t=>t.addEventListener("click",()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x===t));
+  const v=t.dataset.view;
+  document.getElementById("view-control").style.display=v==="control"?"":"none";
+  document.getElementById("view-processing").style.display=v==="processing"?"":"none";
+}));
+const dctls=[];
+document.querySelectorAll(".dctl").forEach((c,i)=>{
+  const cfg=JSON.parse(c.dataset.dsp);
+  const kc=c.querySelector(".dknob");
+  const k=buildKnob(kc,"d"+i);
+  const o={c,cfg,k,val:0};dctls.push(o);
+  let startY=0,startVal=0,dragging=false;
+  kc.addEventListener("pointerdown",e=>{kc.setPointerCapture(e.pointerId);dragging=true;startY=e.clientY;startVal=o.val;e.preventDefault();});
+  kc.addEventListener("pointermove",e=>{if(!dragging)return;const v=clamp(startVal+(startY-e.clientY)/180*(cfg.max-cfg.min),cfg.min,cfg.max);setDsp(o,v,true);});
+  const end=()=>{dragging=false;};kc.addEventListener("pointerup",end);kc.addEventListener("pointercancel",end);
+});
+function dspTarget(cfg){return cfg.group==="master"?"master":selCh;}
+function fmtDsp(cfg,v){if(cfg.unit===":1")return v.toFixed(1)+":1";if(cfg.unit==="x")return v.toFixed(2)+"×";if(cfg.unit==="dB"||cfg.unit==="dBTP")return (v>=0?"+":"")+v.toFixed(1);return v.toFixed(1);}
+function setDsp(o,v,send){const t=dspTarget(o.cfg);dspState[t][o.cfg.param]=v;o.val=v;
+  const norm=clamp((v-o.cfg.min)/(o.cfg.max-o.cfg.min),0,1);setKnob(o.k,norm);
+  o.c.querySelector(".dv").textContent=fmtDsp(o.cfg,v);
+  if(send)wsSend({type:"set_dsp_param",target:t,param:o.cfg.param,value:Math.round(v*1000)/1000});}
+function renderDsp(){dctls.forEach(o=>{const t=dspTarget(o.cfg);setDsp(o,dspState[t][o.cfg.param],false);});}
+document.querySelectorAll("[data-selch]").forEach(b=>b.addEventListener("click",()=>{selCh=b.dataset.selch;
+  document.querySelectorAll("[data-selch]").forEach(x=>x.classList.toggle("on",x===b));renderDsp();}));
+document.querySelectorAll("[data-scale]").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll("[data-scale]").forEach(x=>x.classList.toggle("on",x===b));
+  wsSend({type:"set_tuner_scale",target:selCh,scale:b.dataset.scale});}));
+renderDsp();
+
 setConn(false);connect();
 window.addEventListener("resize",()=>{for(const k in fader){const f=document.querySelector(`[data-fader="${k}"]`);if(f&&f._place)f._place(fader[k].step);}});
 // Register service worker so the page is installable as a home-screen app
