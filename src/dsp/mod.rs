@@ -22,12 +22,14 @@ pub mod limiter;
 pub mod lufs_meter;
 pub mod rack;
 pub mod exciter;
+pub mod lv2_host;
 pub mod channel_strip;
 pub mod master_chain;
 
 pub use channel_strip::ChannelStrip;
 pub use master_chain::MasterChain;
 pub use rack::{MonoRack, StereoRack};
+pub use lv2_host::{Lv2Host, Lv2Node};
 
 /// Real-time node telemetry for UI and meters without heap allocations.
 #[derive(Debug, Clone, Copy, Default)]

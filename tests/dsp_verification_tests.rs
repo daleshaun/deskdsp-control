@@ -476,5 +476,55 @@ fn test_harmonic_exciter_rack_integration() {
     assert!(!out.is_nan() && out != 0.0);
 }
 
+#[test]
+fn test_lv2_host_scanning_instantiation_and_rack_integration() {
+    use deskdsp_control::dsp::lv2_host::{Lv2Host, Lv2Node};
+    use deskdsp_control::dsp::rack::StereoRack;
+    use deskdsp_control::dsp::StereoDspNode;
+
+    let sample_rate = 48000.0_f64;
+    let host = Lv2Host::new().expect("Failed to initialize LV2 host");
+
+    // 1. Scan installed / supported LV2 plugins
+    let plugins = host.scan_plugins();
+    assert!(!plugins.is_empty(), "LV2 host must discover available plugins or ecosystem presets");
+
+    let first_plugin = &plugins[0];
+    let uri = &first_plugin.uri;
+
+    // 2. Instantiate plugin
+    let mut node = host.load_plugin(uri, sample_rate).expect("Failed to instantiate LV2 plugin");
+    assert_eq!(node.name(), "LV2 Host Node");
+    assert_eq!(&node.uri, uri);
+
+    // 3. Control port parameter bridging
+    if !node.controls.is_empty() {
+        let sym = node.controls[0].symbol.clone();
+        node.set_control_value(&sym, 0.75);
+        assert_relative_eq!(node.controls[0].current_value, 0.75, epsilon = 1e-4);
+    }
+
+    // 4. Stereo rack integration
+    let mut rack = StereoRack::with_capacity(4);
+    rack.push(node);
+    assert_eq!(rack.len(), 1);
+
+    // 5. Safe typed downcast
+    assert!(rack.find_node::<Lv2Node>().is_some());
+    assert!(rack.find_node_mut::<Lv2Node>().is_some());
+
+    // 6. Real-time audio processing & bit-identical bypass
+    let (left_in, right_in) = (0.42_f32, -0.42_f32);
+    rack.set_bypassed(0, true);
+    let (byp_l, byp_r) = rack.process_stereo(left_in, right_in);
+    assert_eq!(byp_l, left_in);
+    assert_eq!(byp_r, right_in);
+
+    rack.set_bypassed(0, false);
+    let (out_l, out_r) = rack.process_stereo(left_in, right_in);
+    assert!(!out_l.is_nan() && !out_r.is_nan());
+}
+
+
 
 
