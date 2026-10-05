@@ -1,0 +1,4 @@
+# Antelope Audio Zen Go Synergy Core USB HID access rule
+# Allows non-root users in the 'audio' group (or active desktop seat) to access Zen Go HID control
+SUBSYSTEM=="usb", ATTRS{idVendor}=="23e5", ATTRS{idProduct}=="a015", MODE="0666", GROUP="audio", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="23e5", ATTRS{idProduct}=="a015", MODE="0666", GROUP="audio", TAG+="uaccess"
