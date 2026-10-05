@@ -1,0 +1,12 @@
+[package]
+name = "deskdsp-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "DeskDSP Vocal Strip and Master Chain DAW Plugin (CLAP and VST3)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+deskdsp-control = { path = "../.." }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["assert_process_allocs", "vst3"] }
