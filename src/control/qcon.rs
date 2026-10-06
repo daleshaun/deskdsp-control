@@ -24,6 +24,8 @@ pub struct QConSurface {
     last_fader_pitch_bend: [u16; 9],
     last_led_state: [i8; 128],
     last_vpot_led: [i8; 8],
+    last_lcd_row1: String,
+    last_lcd_row2: String,
 
     // Cached values for 8 V-pot parameters on the active channel
     vpot_values: [f32; 8],
@@ -40,6 +42,8 @@ impl Default for QConSurface {
             last_fader_pitch_bend: [0xFFFF; 9], // Force initial feedback
             last_led_state: [-1; 128],          // -1 = uninitialized
             last_vpot_led: [-1; 8],             // -1 = uninitialized
+            last_lcd_row1: String::new(),
+            last_lcd_row2: String::new(),
             vpot_values: [
                 -30.0, // Gate threshold (-60..0)
                 -18.0, // Comp threshold (-50..0)
@@ -100,6 +104,49 @@ impl QConSurface {
             // Positive increment
             (val & 0x3F) as i32
         }
+    }
+
+    /// Formats the 56-character Row 1 (parameter labels for 8 V-pots).
+    pub fn format_lcd_row1(&self) -> String {
+        "GateTh CompTh SatDrv EQLow  EQLMid EQHMid EQHi   AmpDrv ".to_string()
+    }
+
+    /// Formats the 56-character Row 2 (current parameter values for 8 V-pots).
+    pub fn format_lcd_row2(&self) -> String {
+        let col0 = format!("{:>5.0}dB", self.vpot_values[0]);
+        let col1 = format!("{:>5.0}dB", self.vpot_values[1]);
+        let col2 = format!("{:>5.1}dB", self.vpot_values[2]);
+        let col3 = format!("{:+5.1}dB", self.vpot_values[3]);
+        let col4 = format!("{:+5.1}dB", self.vpot_values[4]);
+        let col5 = format!("{:+5.1}dB", self.vpot_values[5]);
+        let col6 = format!("{:+5.1}dB", self.vpot_values[6]);
+        let col7 = format!("{:>7.2}", self.vpot_values[7]);
+        format!(
+            "{:<7}{:<7}{:<7}{:<7}{:<7}{:<7}{:<7}{:<7}",
+            &col0[..col0.len().min(7)],
+            &col1[..col1.len().min(7)],
+            &col2[..col2.len().min(7)],
+            &col3[..col3.len().min(7)],
+            &col4[..col4.len().min(7)],
+            &col5[..col5.len().min(7)],
+            &col6[..col6.len().min(7)],
+            &col7[..col7.len().min(7)],
+        )
+    }
+
+    /// Builds an MCU Scribble Strip LCD SysEx message (2 rows of 56 characters, 7 chars per channel strip).
+    /// SysEx format: 0xF0, 0x00, 0x00, 0x66, 0x14, 0x12, <offset 0..111>, <ascii bytes...>, 0xF7
+    pub fn build_lcd_sysex(offset: u8, text: &str) -> Vec<u8> {
+        let mut msg = vec![0xF0, 0x00, 0x00, 0x66, 0x14, 0x12, offset];
+        for b in text.bytes() {
+            if b < 0x80 {
+                msg.push(b);
+            } else {
+                msg.push(b' ');
+            }
+        }
+        msg.push(0xF7);
+        msg
     }
 }
 
@@ -377,6 +424,19 @@ impl ControlSurface for QConSurface {
                 messages.push(vec![0xB0, cc, ring_val]);
                 self.last_vpot_led[i] = ring_val as i8;
             }
+        }
+
+        // 4. Scribble Strip LCD Feedback (Outbound MCU SysEx)
+        let row1 = self.format_lcd_row1();
+        if self.last_lcd_row1 != row1 {
+            messages.push(Self::build_lcd_sysex(0, &row1));
+            self.last_lcd_row1 = row1;
+        }
+
+        let row2 = self.format_lcd_row2();
+        if self.last_lcd_row2 != row2 {
+            messages.push(Self::build_lcd_sysex(56, &row2));
+            self.last_lcd_row2 = row2;
         }
 
         messages

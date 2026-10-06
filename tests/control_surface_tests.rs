@@ -404,3 +404,42 @@ fn test_list_midi_ports_no_crash() {
     let (inputs, outputs) = list_midi_ports();
     println!("Detected {} inputs, {} outputs", inputs.len(), outputs.len());
 }
+
+#[test]
+fn test_qcon_scribble_strip_sysex() {
+    let mut qcon = QConSurface::default();
+    let state = SurfaceState::default();
+
+    // 1. Initial feedback must emit both Row 1 (labels) and Row 2 (values) LCD SysEx
+    let feedback = qcon.feedback(&state);
+    let sysex_msgs: Vec<&Vec<u8>> = feedback.iter().filter(|m| m[0] == 0xF0).collect();
+    assert_eq!(sysex_msgs.len(), 2, "Must emit 2 LCD SysEx messages (Row 1 & Row 2)");
+
+    // Verify MCU SysEx Header: 0xF0, 0x00, 0x00, 0x66, 0x14, 0x12, offset
+    let row1_msg = sysex_msgs[0];
+    assert_eq!(&row1_msg[0..6], &[0xF0, 0x00, 0x00, 0x66, 0x14, 0x12]);
+    assert_eq!(row1_msg[6], 0); // Offset 0 for Row 1
+    assert_eq!(*row1_msg.last().unwrap(), 0xF7); // Terminated with 0xF7
+
+    let row1_text = std::str::from_utf8(&row1_msg[7..row1_msg.len() - 1]).unwrap();
+    assert_eq!(row1_text.len(), 56, "Row 1 must be exactly 56 characters");
+    assert!(row1_text.starts_with("GateTh "));
+
+    let row2_msg = sysex_msgs[1];
+    assert_eq!(row2_msg[6], 56); // Offset 56 for Row 2
+    let row2_text = std::str::from_utf8(&row2_msg[7..row2_msg.len() - 1]).unwrap();
+    assert_eq!(row2_text.len(), 56, "Row 2 must be exactly 56 characters");
+
+    // 2. Deadband: Identical state tick must not re-emit SysEx
+    let second_feedback = qcon.feedback(&state);
+    let second_sysex: Vec<&Vec<u8>> = second_feedback.iter().filter(|m| m[0] == 0xF0).collect();
+    assert_eq!(second_sysex.len(), 0, "Unchanged state must not spam SysEx");
+
+    // 3. V-pot turn updates Row 2 value on next tick
+    qcon.on_midi(&[0xB0, 0x10, 0x05]); // Turn gate threshold up by 5 dB
+    let third_feedback = qcon.feedback(&state);
+    let third_sysex: Vec<&Vec<u8>> = third_feedback.iter().filter(|m| m[0] == 0xF0).collect();
+    assert_eq!(third_sysex.len(), 1, "Only Row 2 value must update on V-pot turn");
+    assert_eq!(third_sysex[0][6], 56); // Row 2 offset
+}
+
