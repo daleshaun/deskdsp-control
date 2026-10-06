@@ -203,9 +203,265 @@ struct AppState {
     broadcast_started: AtomicBool,
 }
 
+impl AppState {
+    pub fn dispatch_remote_message(&self, cmd: RemoteMessage) {
+        match cmd {
+            RemoteMessage::SetGain { input, gain_db } => {
+                let _ = self.cmd_tx.send(CoalescedHidCommand::Gain { input, val: gain_db });
+            }
+            RemoteMessage::SetPhantom { input, enabled } => {
+                let _ = self.cmd_tx.send(CoalescedHidCommand::Phantom { input, val: enabled });
+            }
+            RemoteMessage::SetPhase { input, enabled } => {
+                let _ = self.cmd_tx.send(CoalescedHidCommand::Phase { input, val: enabled });
+            }
+            RemoteMessage::SetMode { input, mode } => {
+                let m = match mode.as_str() {
+                    "Mic" => PreampMode::Mic,
+                    "Line" => PreampMode::Line,
+                    "HiZ" => PreampMode::HiZ,
+                    _ => PreampMode::Mic,
+                };
+                let _ = self.cmd_tx.send(CoalescedHidCommand::Mode { input, mode: m });
+            }
+            RemoteMessage::SetMonitorVolume { step } => {
+                let _ = self.cmd_tx.send(CoalescedHidCommand::MonitorVol { val: step });
+            }
+            RemoteMessage::SetMonitorMute { enabled } => {
+                let _ = self.cmd_tx.send(CoalescedHidCommand::MonitorMute { val: enabled });
+            }
+            RemoteMessage::SetHp1Volume { step } => {
+                let _ = self.cmd_tx.send(CoalescedHidCommand::Hp1Vol { val: step });
+            }
+            RemoteMessage::SetHp2Volume { step } => {
+                let _ = self.cmd_tx.send(CoalescedHidCommand::Hp2Vol { val: step });
+            }
+            RemoteMessage::SetGlobalBypass { enabled } => {
+                self.global_bypass.store(enabled, Ordering::Relaxed);
+            }
+            RemoteMessage::SetNodeBypass { target, node, bypassed } => {
+                let node_id: &'static str = match node.as_str() {
+                    "hpf" => "hpf",
+                    "gate" => "gate",
+                    "deesser" => "deesser",
+                    "eq" => "eq",
+                    "comp" => "comp",
+                    "tuner" => "tuner",
+                    "sat" => "sat",
+                    "amp" => "amp",
+                    "cab" => "cab",
+                    "drive" => "drive",
+                    "chorus" => "chorus",
+                    "reverb" => "reverb",
+                    "mic_image" => "mic_image",
+                    "glue" => "glue",
+                    "width" => "width",
+                    "limiter" => "limiter",
+                    _ => return,
+                };
+                match target.as_str() {
+                    "ch1" => {
+                        let _ = self.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                            target: CommandTarget::Channel1,
+                            node_id,
+                            bypassed,
+                        });
+                    }
+                    "ch2" => {
+                        let _ = self.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                            target: CommandTarget::Channel2,
+                            node_id,
+                            bypassed,
+                        });
+                    }
+                    "both" => {
+                        let _ = self.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                            target: CommandTarget::Channel1,
+                            node_id,
+                            bypassed,
+                        });
+                        let _ = self.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                            target: CommandTarget::Channel2,
+                            node_id,
+                            bypassed,
+                        });
+                    }
+                    "master" => {
+                        let _ = self.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
+                            target: CommandTarget::Master,
+                            node_id,
+                            bypassed,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            RemoteMessage::SetSourceMode { mode } => {
+                let is_prog = mode.to_lowercase() == "program";
+                self.source_mode.store(is_prog, Ordering::Relaxed);
+                let preset = if is_prog { InstrumentPreset::ProgramThru } else { InstrumentPreset::Vocal };
+                if let Ok(mut lock) = self.ch1_preset.write() {
+                    *lock = preset.as_str().to_string();
+                }
+                if let Ok(mut lock) = self.ch2_preset.write() {
+                    *lock = preset.as_str().to_string();
+                }
+                let sample_rate = self.sample_rate;
+                let rack1 = presets::build_rack(preset, sample_rate);
+                let rack2 = presets::build_rack(preset, sample_rate);
+                let _ = self.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                    target: CommandTarget::Channel1,
+                    rack: Box::new(rack1),
+                });
+                let _ = self.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                    target: CommandTarget::Channel2,
+                    rack: Box::new(rack2),
+                });
+            }
+            RemoteMessage::SetChannelPreset { target, preset } => {
+                let preset_variant = InstrumentPreset::parse_str(&preset).unwrap_or(InstrumentPreset::Vocal);
+                let sample_rate = self.sample_rate;
+                let new_rack = presets::build_rack(preset_variant, sample_rate);
+                let cmd_target = match target.to_lowercase().as_str() {
+                    "ch1" | "1" | "input1" => {
+                        if let Ok(mut lock) = self.ch1_preset.write() {
+                            *lock = preset_variant.as_str().to_string();
+                        }
+                        CommandTarget::Channel1
+                    }
+                    "ch2" | "2" | "input2" => {
+                        if let Ok(mut lock) = self.ch2_preset.write() {
+                            *lock = preset_variant.as_str().to_string();
+                        }
+                        CommandTarget::Channel2
+                    }
+                    _ => return,
+                };
+                let _ = self.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                    target: cmd_target,
+                    rack: Box::new(new_rack),
+                });
+            }
+            RemoteMessage::SetDspParam { target, param, value } => {
+                let cmd_target = match target.as_str() {
+                    "ch1" => CommandTarget::Channel1,
+                    "ch2" => CommandTarget::Channel2,
+                    "master" => CommandTarget::Master,
+                    _ => return,
+                };
+                let param_id: &'static str = match param.as_str() {
+                    "gate_threshold" => "gate_threshold",
+                    "comp_threshold" => "comp_threshold",
+                    "comp_ratio" => "comp_ratio",
+                    "sat_drive" => "sat_drive",
+                    "hpf_freq" => "hpf_freq",
+                    "eq_low_gain" => "eq_low_gain",
+                    "eq_lmid_gain" => "eq_lmid_gain",
+                    "eq_hmid_gain" => "eq_hmid_gain",
+                    "eq_hi_gain" => "eq_hi_gain",
+                    "deess_amount" => "deess_amount",
+                    "comp_attack" => "comp_attack",
+                    "comp_release" => "comp_release",
+                    "tuner_retune" => "tuner_retune",
+                    "amp_drive" => "amp_drive",
+                    "amp_level" => "amp_level",
+                    "cab_type" => "cab_type",
+                    "drive_gain" => "drive_gain",
+                    "drive_blend" => "drive_blend",
+                    "chorus_mix" => "chorus_mix",
+                    "reverb_mix" => "reverb_mix",
+                    "glue_threshold" => "glue_threshold",
+                    "stereo_width" => "stereo_width",
+                    "limiter_ceiling" => "limiter_ceiling",
+                    "master_eq_low" => "master_eq_low",
+                    "master_eq_mid" => "master_eq_mid",
+                    "master_eq_high" => "master_eq_high",
+                    "mic_dry_wet" => "mic_dry_wet",
+                    _ => return,
+                };
+                let _ = self.dsp_cmd_tx.send(AudioCommand::SetParam {
+                    target: cmd_target,
+                    param_id,
+                    value,
+                });
+            }
+            RemoteMessage::SetTunerScale { target, scale } => {
+                let cmd_target = match target.as_str() {
+                    "ch1" => CommandTarget::Channel1,
+                    "ch2" => CommandTarget::Channel2,
+                    _ => return,
+                };
+                let scale_variant = match scale.as_str() {
+                    "Chromatic" => Scale::Chromatic,
+                    "Major" => Scale::Major,
+                    "NaturalMinor" => Scale::NaturalMinor,
+                    "HarmonicMinor" => Scale::HarmonicMinor,
+                    "MajorPentatonic" => Scale::MajorPentatonic,
+                    "MinorPentatonic" => Scale::MinorPentatonic,
+                    _ => return,
+                };
+                let _ = self.dsp_cmd_tx.send(AudioCommand::SetTunerScale {
+                    target: cmd_target,
+                    scale: scale_variant,
+                });
+            }
+            RemoteMessage::SetMicVoicing { target, voicing } => {
+                let parsed = crate::dsp::MicVoicing::parse_str(&voicing).unwrap_or(crate::dsp::MicVoicing::Flat);
+                let cmd_target = match target.to_lowercase().as_str() {
+                    "ch1" | "1" => {
+                        if let Ok(mut lock) = self.ch1_voicing.write() {
+                            *lock = parsed.as_str().to_string();
+                        }
+                        CommandTarget::Channel1
+                    }
+                    "ch2" | "2" => {
+                        if let Ok(mut lock) = self.ch2_voicing.write() {
+                            *lock = parsed.as_str().to_string();
+                        }
+                        CommandTarget::Channel2
+                    }
+                    _ => return,
+                };
+                let _ = self.dsp_cmd_tx.send(AudioCommand::ApplyMicVoicing {
+                    target: cmd_target,
+                    voicing: parsed,
+                });
+            }
+            RemoteMessage::SetMicImageIr { target, ir_name, samples } => {
+                let (cmd_target, flag_ref) = match target.to_lowercase().as_str() {
+                    "ch1" | "1" => (CommandTarget::Channel1, &self.ch1_mic_ir_loaded),
+                    "ch2" | "2" => (CommandTarget::Channel2, &self.ch2_mic_ir_loaded),
+                    _ => return,
+                };
+                let sample_rate = self.sample_rate;
+                if let Some(s) = samples {
+                    if !s.is_empty() {
+                        let rack = crate::dsp::build_vocal_rack_with_mic_image(&s, &ir_name, sample_rate);
+                        flag_ref.store(true, Ordering::Relaxed);
+                        let _ = self.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                            target: cmd_target,
+                            rack: Box::new(rack),
+                        });
+                        return;
+                    }
+                }
+                let rack = presets::build_rack(InstrumentPreset::Vocal, sample_rate);
+                flag_ref.store(false, Ordering::Relaxed);
+                let _ = self.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                    target: cmd_target,
+                    rack: Box::new(rack),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct TabletRemoteServer {
     port: u16,
     state: Arc<AppState>,
+    pub(crate) remote_msg_tx: std::sync::mpsc::Sender<RemoteMessage>,
 }
 
 impl TabletRemoteServer {
@@ -348,18 +604,82 @@ impl TabletRemoteServer {
             broadcast_started: AtomicBool::new(false),
         });
 
-        // 2. Real-Time Hardware -> Tablet State Sync Broadcast Worker
+        // 2. Dedicated RemoteMessage Dispatcher (Dedicated OS Thread)
+        let (remote_msg_tx, remote_msg_rx) = std::sync::mpsc::channel::<RemoteMessage>();
+        let state_dispatch = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("remote-msg-dispatcher".into())
+            .spawn(move || {
+                while let Ok(msg) = remote_msg_rx.recv() {
+                    state_dispatch.dispatch_remote_message(msg);
+                }
+            })
+            .expect("Failed to spawn remote-msg-dispatcher thread");
+
+        // 3. Real-Time Hardware -> Tablet State Sync Broadcast Worker
         // If constructed inside a Tokio runtime, spawn the broadcast worker immediately.
         if tokio::runtime::Handle::try_current().is_ok() {
             Self::spawn_broadcast_worker(&state);
         }
 
-        Self { port, state }
+        Self { port, state, remote_msg_tx }
     }
 
     /// Expose command sender so AudioEngine / Desktop TUI can route through the lock-free forwarder.
     pub fn dsp_command_sender(&self) -> std::sync::mpsc::Sender<AudioCommand> {
         self.state.dsp_cmd_tx.clone()
+    }
+
+    /// Expose remote message sender so Control Surfaces can dispatch directly.
+    pub fn message_sender(&self) -> std::sync::mpsc::Sender<RemoteMessage> {
+        self.remote_msg_tx.clone()
+    }
+
+
+    /// Generates a snapshot of SurfaceState for hardware feedback.
+    pub fn surface_state_snapshot(&self) -> crate::control::SurfaceState {
+        let snap = self.state.hw.as_ref().and_then(|h| h.get_snapshot());
+        let (ch1_gain, ch2_gain, mon_vol, hp1, hp2) = if let Some(s) = snap {
+            (s.preamp.input1.gain_raw, s.preamp.input2.gain_raw, s.outputs[0].volume, s.outputs[1].volume, s.outputs[2].volume)
+        } else {
+            (30, 30, 0, 0, 0)
+        };
+        let ch1_str = self.state.ch1_preset.read().map(|g| g.clone()).unwrap_or_else(|_| "vocal".into());
+        let ch2_str = self.state.ch2_preset.read().map(|g| g.clone()).unwrap_or_else(|_| "vocal".into());
+        let p1 = InstrumentPreset::parse_str(&ch1_str).unwrap_or(InstrumentPreset::Vocal);
+        let p2 = InstrumentPreset::parse_str(&ch2_str).unwrap_or(InstrumentPreset::Vocal);
+
+        let in_l = AudioMeters::load_f32(&self.state.meters.in_l_peak);
+        let in_r = AudioMeters::load_f32(&self.state.meters.in_r_peak);
+        let out_l = AudioMeters::load_f32(&self.state.meters.out_l_peak);
+        let out_r = AudioMeters::load_f32(&self.state.meters.out_r_peak);
+        let in_l_dbfs = if in_l > 1e-4 { 20.0 * in_l.log10() } else { -80.0 };
+        let in_r_dbfs = if in_r > 1e-4 { 20.0 * in_r.log10() } else { -80.0 };
+        let out_l_dbfs = if out_l > 1e-4 { 20.0 * out_l.log10() } else { -80.0 };
+        let out_r_dbfs = if out_r > 1e-4 { 20.0 * out_r.log10() } else { -80.0 };
+        let comp_gr_db = AudioMeters::load_f32(&self.state.meters.comp_gr_db);
+        let limiter_gr_db = AudioMeters::load_f32(&self.state.meters.master_limiter_gr_db);
+
+        crate::control::SurfaceState {
+            ch1_gain_db: ch1_gain,
+            ch2_gain_db: ch2_gain,
+            monitor_step: mon_vol,
+            hp1_step: hp1,
+            hp2_step: hp2,
+            global_bypass: self.state.global_bypass.load(Ordering::Relaxed),
+            source_mode: if self.state.source_mode.load(Ordering::Relaxed) { "program".into() } else { "vocal".into() },
+            ch1_preset: p1,
+            ch2_preset: p2,
+            selected_channel: 0,
+            ch1_bypassed: false,
+            ch2_bypassed: false,
+            in_l_dbfs,
+            in_r_dbfs,
+            out_l_dbfs,
+            out_r_dbfs,
+            comp_gr_db,
+            limiter_gr_db,
+        }
     }
 
     fn spawn_broadcast_worker(state: &Arc<AppState>) {
@@ -756,268 +1076,7 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
             Some(Ok(msg)) = socket.recv() => {
                 if let Message::Text(text) = msg {
                     if let Ok(cmd) = serde_json::from_str::<RemoteMessage>(&text) {
-                        match cmd {
-                            RemoteMessage::SetGain { input, gain_db } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Gain { input, val: gain_db });
-                            }
-                            RemoteMessage::SetPhantom { input, enabled } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Phantom { input, val: enabled });
-                            }
-                            RemoteMessage::SetPhase { input, enabled } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Phase { input, val: enabled });
-                            }
-                            RemoteMessage::SetMode { input, mode } => {
-                                let m = match mode.as_str() {
-                                    "Mic" => PreampMode::Mic,
-                                    "Line" => PreampMode::Line,
-                                    "HiZ" => PreampMode::HiZ,
-                                    _ => PreampMode::Mic,
-                                };
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Mode { input, mode: m });
-                            }
-                            RemoteMessage::SetMonitorVolume { step } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::MonitorVol { val: step });
-                            }
-                            RemoteMessage::SetMonitorMute { enabled } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::MonitorMute { val: enabled });
-                            }
-                            RemoteMessage::SetHp1Volume { step } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Hp1Vol { val: step });
-                            }
-                            RemoteMessage::SetHp2Volume { step } => {
-                                let _ = state.cmd_tx.send(CoalescedHidCommand::Hp2Vol { val: step });
-                            }
-                            RemoteMessage::SetGlobalBypass { enabled } => {
-                                state.global_bypass.store(enabled, Ordering::Relaxed);
-                            }
-                            RemoteMessage::SetNodeBypass { target, node, bypassed } => {
-                                let node_id: &'static str = match node.as_str() {
-                                    "hpf" => "hpf",
-                                    "gate" => "gate",
-                                    "deesser" => "deesser",
-                                    "eq" => "eq",
-                                    "comp" => "comp",
-                                    "tuner" => "tuner",
-                                    "sat" => "sat",
-                                    "amp" => "amp",
-                                    "cab" => "cab",
-                                    "drive" => "drive",
-                                    "chorus" => "chorus",
-                                    "reverb" => "reverb",
-                                    "exciter" => "exciter",
-                                    "master_eq" => "master_eq",
-                                    "multiband" => "multiband",
-                                    "stereo_width" | "width" => "stereo_width",
-                                    "glue" => "glue",
-                                    "limiter" => "limiter",
-                                    _ => continue,
-                                };
-                                match target.as_str() {
-                                    "ch1" => {
-                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
-                                            target: CommandTarget::Channel1,
-                                            node_id,
-                                            bypassed,
-                                        });
-                                    }
-                                    "ch2" => {
-                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
-                                            target: CommandTarget::Channel2,
-                                            node_id,
-                                            bypassed,
-                                        });
-                                    }
-                                    "both" => {
-                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
-                                            target: CommandTarget::Channel1,
-                                            node_id,
-                                            bypassed,
-                                        });
-                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
-                                            target: CommandTarget::Channel2,
-                                            node_id,
-                                            bypassed,
-                                        });
-                                    }
-                                    "master" => {
-                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SetNodeBypass {
-                                            target: CommandTarget::Master,
-                                            node_id,
-                                            bypassed,
-                                        });
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            RemoteMessage::SetSourceMode { mode } => {
-                                let is_prog = mode.to_lowercase() == "program";
-                                state.source_mode.store(is_prog, Ordering::Relaxed);
-                                let preset = if is_prog { InstrumentPreset::ProgramThru } else { InstrumentPreset::Vocal };
-                                if let Ok(mut lock) = state.ch1_preset.write() {
-                                    *lock = preset.as_str().to_string();
-                                }
-                                if let Ok(mut lock) = state.ch2_preset.write() {
-                                    *lock = preset.as_str().to_string();
-                                }
-                                let sample_rate = state.sample_rate;
-                                let rack1 = presets::build_rack(preset, sample_rate);
-                                let rack2 = presets::build_rack(preset, sample_rate);
-                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
-                                    target: CommandTarget::Channel1,
-                                    rack: Box::new(rack1),
-                                });
-                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
-                                    target: CommandTarget::Channel2,
-                                    rack: Box::new(rack2),
-                                });
-                            }
-                            RemoteMessage::SetChannelPreset { target, preset } => {
-                                let preset_variant = InstrumentPreset::parse_str(&preset).unwrap_or(InstrumentPreset::Vocal);
-                                let sample_rate = state.sample_rate;
-                                // Build rack OFF the audio thread:
-                                let new_rack = presets::build_rack(preset_variant, sample_rate);
-                                let cmd_target = match target.to_lowercase().as_str() {
-                                    "ch1" | "1" | "input1" => {
-                                        if let Ok(mut lock) = state.ch1_preset.write() {
-                                            *lock = preset_variant.as_str().to_string();
-                                        }
-                                        CommandTarget::Channel1
-                                    }
-                                    "ch2" | "2" | "input2" => {
-                                        if let Ok(mut lock) = state.ch2_preset.write() {
-                                            *lock = preset_variant.as_str().to_string();
-                                        }
-                                        CommandTarget::Channel2
-                                    }
-                                    _ => continue,
-                                };
-
-                                let ch1_is_prog = state.ch1_preset.read().map(|g| *g == "program").unwrap_or(false);
-                                let ch2_is_prog = state.ch2_preset.read().map(|g| *g == "program").unwrap_or(false);
-                                if ch1_is_prog && ch2_is_prog {
-                                    state.source_mode.store(true, Ordering::Relaxed);
-                                } else {
-                                    state.source_mode.store(false, Ordering::Relaxed);
-                                }
-
-                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
-                                    target: cmd_target,
-                                    rack: Box::new(new_rack),
-                                });
-                            }
-                            RemoteMessage::SetDspParam { target, param, value } => {
-                                let cmd_target = match target.as_str() {
-                                    "ch1" => CommandTarget::Channel1,
-                                    "ch2" => CommandTarget::Channel2,
-                                    "master" => CommandTarget::Master,
-                                    _ => continue,
-                                };
-                                let param_id: &'static str = match param.as_str() {
-                                    "gate_threshold" => "gate_threshold",
-                                    "comp_threshold" => "comp_threshold",
-                                    "comp_ratio" => "comp_ratio",
-                                    "sat_drive" => "sat_drive",
-                                    "hpf_freq" => "hpf_freq",
-                                    "eq_low_gain" => "eq_low_gain",
-                                    "eq_lmid_gain" => "eq_lmid_gain",
-                                    "eq_hmid_gain" => "eq_hmid_gain",
-                                    "eq_hi_gain" => "eq_hi_gain",
-                                    "deess_amount" => "deess_amount",
-                                    "comp_attack" => "comp_attack",
-                                    "comp_release" => "comp_release",
-                                    "tuner_retune" => "tuner_retune",
-                                    "amp_drive" => "amp_drive",
-                                    "amp_level" => "amp_level",
-                                    "cab_type" => "cab_type",
-                                    "drive_gain" => "drive_gain",
-                                    "drive_blend" => "drive_blend",
-                                    "chorus_mix" => "chorus_mix",
-                                    "reverb_mix" => "reverb_mix",
-                                    "glue_threshold" => "glue_threshold",
-                                    "stereo_width" => "stereo_width",
-                                    "limiter_ceiling" => "limiter_ceiling",
-                                    "master_eq_low" => "master_eq_low",
-                                    "master_eq_mid" => "master_eq_mid",
-                                    "master_eq_high" => "master_eq_high",
-                                    "mic_dry_wet" => "mic_dry_wet",
-                                    _ => continue,
-                                };
-                                let _ = state.dsp_cmd_tx.send(AudioCommand::SetParam {
-                                    target: cmd_target,
-                                    param_id,
-                                    value,
-                                });
-                            }
-                            RemoteMessage::SetTunerScale { target, scale } => {
-                                let cmd_target = match target.as_str() {
-                                    "ch1" => CommandTarget::Channel1,
-                                    "ch2" => CommandTarget::Channel2,
-                                    _ => continue,
-                                };
-                                let scale_variant = match scale.as_str() {
-                                    "Chromatic" => Scale::Chromatic,
-                                    "Major" => Scale::Major,
-                                    "NaturalMinor" => Scale::NaturalMinor,
-                                    "HarmonicMinor" => Scale::HarmonicMinor,
-                                    "MajorPentatonic" => Scale::MajorPentatonic,
-                                    "MinorPentatonic" => Scale::MinorPentatonic,
-                                    _ => continue,
-                                };
-                                let _ = state.dsp_cmd_tx.send(AudioCommand::SetTunerScale {
-                                    target: cmd_target,
-                                    scale: scale_variant,
-                                });
-                            }
-                            RemoteMessage::SetMicVoicing { target, voicing } => {
-                                let parsed = crate::dsp::MicVoicing::parse_str(&voicing).unwrap_or(crate::dsp::MicVoicing::Flat);
-                                let cmd_target = match target.to_lowercase().as_str() {
-                                    "ch1" | "1" => {
-                                        if let Ok(mut lock) = state.ch1_voicing.write() {
-                                            *lock = parsed.as_str().to_string();
-                                        }
-                                        CommandTarget::Channel1
-                                    }
-                                    "ch2" | "2" => {
-                                        if let Ok(mut lock) = state.ch2_voicing.write() {
-                                            *lock = parsed.as_str().to_string();
-                                        }
-                                        CommandTarget::Channel2
-                                    }
-                                    _ => continue,
-                                };
-                                let _ = state.dsp_cmd_tx.send(AudioCommand::ApplyMicVoicing {
-                                    target: cmd_target,
-                                    voicing: parsed,
-                                });
-                            }
-                            RemoteMessage::SetMicImageIr { target, ir_name, samples } => {
-                                let (cmd_target, flag_ref) = match target.to_lowercase().as_str() {
-                                    "ch1" | "1" => (CommandTarget::Channel1, &state.ch1_mic_ir_loaded),
-                                    "ch2" | "2" => (CommandTarget::Channel2, &state.ch2_mic_ir_loaded),
-                                    _ => continue,
-                                };
-                                let sample_rate = state.sample_rate;
-                                if let Some(s) = samples {
-                                    if !s.is_empty() {
-                                        let rack = crate::dsp::build_vocal_rack_with_mic_image(&s, &ir_name, sample_rate);
-                                        flag_ref.store(true, Ordering::Relaxed);
-                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
-                                            target: cmd_target,
-                                            rack: Box::new(rack),
-                                        });
-                                        continue;
-                                    }
-                                }
-                                // Unload IR -> restore standard Vocal rack
-                                let rack = presets::build_rack(InstrumentPreset::Vocal, sample_rate);
-                                flag_ref.store(false, Ordering::Relaxed);
-                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
-                                    target: cmd_target,
-                                    rack: Box::new(rack),
-                                });
-                            }
-                            _ => {}
-                        }
+                        state.dispatch_remote_message(cmd);
                     }
                 }
             }

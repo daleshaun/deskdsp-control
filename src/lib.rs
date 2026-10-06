@@ -2,6 +2,7 @@
 //! Modular real-time DSP and Zen Go hardware controller.
 
 pub mod audio;
+pub mod control;
 pub mod dsp;
 pub mod hardware;
 pub mod presets;

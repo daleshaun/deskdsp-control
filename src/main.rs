@@ -1,4 +1,5 @@
 mod audio;
+mod control;
 mod dsp;
 mod hardware;
 mod presets;
@@ -64,6 +65,22 @@ struct Args {
     /// List all available audio input and output devices and exit
     #[arg(long)]
     list_devices: bool,
+
+    /// Hardware control surface integration ("mk3", "qcon", "both", "none")
+    #[arg(long, default_value = "none")]
+    control_surface: String,
+
+    /// Filter pattern for MIDI input port name (e.g. "Maschine", "QCon")
+    #[arg(long)]
+    midi_in: Option<String>,
+
+    /// Filter pattern for MIDI output port name (e.g. "QCon")
+    #[arg(long)]
+    midi_out: Option<String>,
+
+    /// List all available MIDI input and output ports and exit
+    #[arg(long)]
+    list_midi: bool,
 }
 
 fn main() -> Result<()> {
@@ -71,6 +88,27 @@ fn main() -> Result<()> {
 
     if args.list_devices {
         return AudioEngine::list_devices();
+    }
+
+    if args.list_midi {
+        let (inputs, outputs) = control::list_midi_ports();
+        println!("--- Available MIDI Input Ports ---");
+        if inputs.is_empty() {
+            println!("  (No MIDI input ports found)");
+        } else {
+            for (i, name) in inputs.iter().enumerate() {
+                println!("  [{i}] {name}");
+            }
+        }
+        println!("\n--- Available MIDI Output Ports ---");
+        if outputs.is_empty() {
+            println!("  (No MIDI output ports found)");
+        } else {
+            for (i, name) in outputs.iter().enumerate() {
+                println!("  [{i}] {name}");
+            }
+        }
+        return Ok(());
     }
 
     println!("⚡ DeskDSP Control — Initializing Zen Go Hardware Controller...");
@@ -193,7 +231,13 @@ fn main() -> Result<()> {
                         token,
                         sample_rate,
                     );
-                    let _ = tx_forwarder.send(server.dsp_command_sender());
+                    let s_clone = server.clone();
+                    let s_query = Arc::new(move || s_clone.surface_state_snapshot()) as Arc<dyn Fn() -> control::SurfaceState + Send + Sync>;
+                    let _ = tx_forwarder.send((
+                        server.dsp_command_sender(),
+                        server.message_sender(),
+                        s_query,
+                    ));
                     if let Err(e) = server.run().await {
                         eprintln!("Tablet remote server error: {e}");
                     }
@@ -201,8 +245,71 @@ fn main() -> Result<()> {
             })
             .expect("Failed to spawn tablet remote thread");
 
-        if let Ok(sender) = rx_forwarder.recv_timeout(std::time::Duration::from_secs(2)) {
-            audio.set_command_sender(sender);
+        if let Ok((dsp_sender, remote_sender, state_query)) = rx_forwarder.recv_timeout(std::time::Duration::from_secs(2)) {
+            audio.set_command_sender(dsp_sender);
+
+            // Connect Hardware Control Surface(s) if enabled
+            let surface_type = args.control_surface.to_lowercase();
+            if surface_type != "none" {
+                match surface_type.as_str() {
+                    "mk3" => {
+                        let mk3 = control::Mk3Surface::default();
+                        let pat_in = args.midi_in.clone().or_else(|| Some("maschine".into()));
+                        if let Ok(runner) = control::SurfaceRunner::start(
+                            mk3,
+                            pat_in,
+                            None,
+                            remote_sender.clone(),
+                            Arc::clone(&state_query),
+                        ) {
+                            std::mem::forget(runner);
+                        }
+                    }
+                    "qcon" => {
+                        let qcon = control::QConSurface::default();
+                        let pat_in = args.midi_in.clone().or_else(|| Some("qcon".into()));
+                        let pat_out = args.midi_out.clone().or_else(|| Some("qcon".into()));
+                        if let Ok(runner) = control::SurfaceRunner::start(
+                            qcon,
+                            pat_in,
+                            pat_out,
+                            remote_sender.clone(),
+                            Arc::clone(&state_query),
+                        ) {
+                            std::mem::forget(runner);
+                        }
+                    }
+                    "both" => {
+                        let mk3 = control::Mk3Surface::default();
+                        let pat_in_mk3 = args.midi_in.clone().or_else(|| Some("maschine".into()));
+                        if let Ok(runner) = control::SurfaceRunner::start(
+                            mk3,
+                            pat_in_mk3,
+                            None,
+                            remote_sender.clone(),
+                            Arc::clone(&state_query),
+                        ) {
+                            std::mem::forget(runner);
+                        }
+
+                        let qcon = control::QConSurface::default();
+                        let pat_in_qcon = args.midi_in.clone().or_else(|| Some("qcon".into()));
+                        let pat_out_qcon = args.midi_out.clone().or_else(|| Some("qcon".into()));
+                        if let Ok(runner) = control::SurfaceRunner::start(
+                            qcon,
+                            pat_in_qcon,
+                            pat_out_qcon,
+                            remote_sender.clone(),
+                            Arc::clone(&state_query),
+                        ) {
+                            std::mem::forget(runner);
+                        }
+                    }
+                    other => {
+                        eprintln!("Unknown control surface: \"{other}\". Supported: mk3, qcon, both, none.");
+                    }
+                }
+            }
         }
 
         println!("📡 Wireless Touch Tablet Remote running at: http://0.0.0.0:{}", args.remote_port);
