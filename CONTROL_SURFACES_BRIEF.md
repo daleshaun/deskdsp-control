@@ -1,5 +1,21 @@
 # Brief: MK3 + QCon Control-Surface Integration
 
+## 0. Execution mode — RUN TO COMPLETION, DO NOT PAUSE FOR APPROVAL
+
+**Work this entire brief through to the end in one continuous run. Do NOT stop to
+ask "should I proceed?", "ready to submit?", or wait for a yes/confirm between
+steps.** Go straight through: implement → build → test → fix failures → repeat
+until green → commit → `git push origin main`. Then report what you did.
+
+- Do not present a plan and wait for sign-off. Start building.
+- Do not pause between build phases for confirmation. Continue to the next phase.
+- If something is ambiguous, pick the most reasonable default, **note the
+  assumption in your final report**, and keep going — do not halt to ask.
+- Only stop early for a genuine hard blocker: a destructive/irreversible action,
+  missing credentials/hardware you cannot work around, or a contradiction that
+  makes the task impossible. Otherwise, finish.
+- Always end by committing and pushing to `origin/main`, then summarizing.
+
 **For:** antigravity (on-Mac implementation)
 **Author:** Claude (peer/architecture)
 **Hard constraint:** must be **built and tested WITHOUT the hardware connected.** The
