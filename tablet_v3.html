@@ -182,7 +182,11 @@
   .lblright{display:flex;align-items:center;gap:8px}
   .nbyp{cursor:pointer;font-size:8.5px;font-weight:800;letter-spacing:1px;padding:4px 9px;border-radius:5px;
     background:#1b1a1f;color:#8f8e86;border:1px solid #55535c;box-shadow:inset 0 1px 1px rgba(0,0,0,.5)}
-  .nbyp.inon{background:linear-gradient(180deg,#52b06e,#2f7d49);color:#08140c;border-color:#1f5531;box-shadow:0 0 8px rgba(79,165,108,.5)}
+  .presetRow{display:flex;align-items:center;gap:6px;justify-content:center;margin:0 0 2px}
+  .psTag{font-size:8.5px;color:var(--muted);font-weight:700;letter-spacing:1px}
+  .presetSel{font-size:10.5px;font-weight:800;color:var(--cream);background:#1a191f;border:1px solid #3d3b45;border-radius:6px;padding:3px 6px;outline:none;cursor:pointer}
+  .presetSel:focus{border-color:var(--amber)}
+  .sugHint{font-size:9px;color:var(--amber);font-weight:700;letter-spacing:.5px;min-height:12px;text-align:center;margin-bottom:2px}
   svg{display:block}
 </style>
 </head>
@@ -222,8 +226,21 @@
     </div>
 
     <div class="panel chan" data-ch="1">
-      <div class="lbl"><span>CH 1 · VOX</span><span class="tiny modeTag">—</span></div>
+      <div class="lbl"><span data-chtitle="1">CH 1 · VOX</span><span class="tiny modeTag">—</span></div>
       <div class="in">
+        <div class="presetRow">
+          <span class="psTag">CHAIN:</span>
+          <select class="presetSel" data-chpreset="1">
+            <option value="vocal">Vocal (Mic)</option>
+            <option value="eguitar">Electric Guitar</option>
+            <option value="aguitar">Acoustic Guitar</option>
+            <option value="bass">Bass</option>
+            <option value="keys">Keys / Synth</option>
+            <option value="piano">Piano / EP</option>
+            <option value="program">Program Thru</option>
+          </select>
+        </div>
+        <div class="sugHint" data-sug="1">Suggested: Mic · +48V</div>
         <div class="knob" data-knob="1"></div>
         <div class="gv" data-val="1">—</div><div class="gt">PREAMP GAIN</div>
         <div class="btns modeBtns"><span class="bg" data-mode="mic">MIC</span><span class="bg" data-mode="line">LINE</span><span class="bg" data-mode="hiz">HI-Z</span></div>
@@ -233,8 +250,21 @@
     </div>
 
     <div class="panel chan" data-ch="2">
-      <div class="lbl"><span>CH 2 · GTR</span><span class="tiny modeTag">—</span></div>
+      <div class="lbl"><span data-chtitle="2">CH 2 · GTR</span><span class="tiny modeTag">—</span></div>
       <div class="in">
+        <div class="presetRow">
+          <span class="psTag">CHAIN:</span>
+          <select class="presetSel" data-chpreset="2">
+            <option value="vocal">Vocal (Mic)</option>
+            <option value="eguitar">Electric Guitar</option>
+            <option value="aguitar">Acoustic Guitar</option>
+            <option value="bass">Bass</option>
+            <option value="keys">Keys / Synth</option>
+            <option value="piano">Piano / EP</option>
+            <option value="program">Program Thru</option>
+          </select>
+        </div>
+        <div class="sugHint" data-sug="2">Suggested: Hi-Z</div>
         <div class="knob" data-knob="2"></div>
         <div class="gv" data-val="2">—</div><div class="gt">PREAMP GAIN</div>
         <div class="btns modeBtns"><span class="bg" data-mode="mic">MIC</span><span class="bg" data-mode="line">LINE</span><span class="bg" data-mode="hiz">HI-Z</span></div>
@@ -383,6 +413,14 @@ document.querySelectorAll(".chan").forEach(p=>{const n=p.dataset.ch;
     if(b.dataset.tog==="48v")wsSend({type:"set_phantom",input:(n-1),enabled:on});
     else if(b.dataset.tog==="phase")wsSend({type:"set_phase",input:(n-1),enabled:on});}));});
 
+document.querySelectorAll("[data-chpreset]").forEach(sel=>{
+  sel.addEventListener("change",()=>{
+    const n=sel.dataset.chpreset;
+    const p=sel.value;
+    wsSend({type:"set_channel_preset",target:"ch"+n,preset:p});
+  });
+});
+
 const FMAX=96;
 const fader={mon:{step:0,drag:false},hp1:{step:0,drag:false},hp2:{step:0,drag:false}};
 document.querySelectorAll("[data-fader]").forEach(f=>{const key=f.dataset.fader,cap=f.querySelector(".cap");
@@ -417,6 +455,22 @@ function setConn(ok){const c=document.getElementById("conn"),t=document.getEleme
 function onMsg(s){if(s.type!=="state_sync")return;
   if(typeof s.global_bypass==="boolean"){dspBypassed=s.global_bypass;renderBypass();}
   if(typeof s.source_mode==="string" && s.source_mode!==srcMode){srcMode=s.source_mode;renderSrc();}
+  if(s.ch1_preset){
+    const sel1=document.querySelector('[data-chpreset="1"]');
+    if(sel1&&document.activeElement!==sel1)sel1.value=s.ch1_preset;
+    const sug1=document.querySelector('[data-sug="1"]');
+    if(sug1)sug1.textContent="Suggested: "+(s.ch1_suggested_mode||"Mic")+(s.ch1_suggested_phantom?" · +48V":"");
+    const tit1=document.querySelector('[data-chtitle="1"]');
+    if(tit1)tit1.textContent="CH 1 · "+s.ch1_preset.toUpperCase();
+  }
+  if(s.ch2_preset){
+    const sel2=document.querySelector('[data-chpreset="2"]');
+    if(sel2&&document.activeElement!==sel2)sel2.value=s.ch2_preset;
+    const sug2=document.querySelector('[data-sug="2"]');
+    if(sug2)sug2.textContent="Suggested: "+(s.ch2_suggested_mode||"HiZ")+(s.ch2_suggested_phantom?" · +48V":"");
+    const tit2=document.querySelector('[data-chtitle="2"]');
+    if(tit2)tit2.textContent="CH 2 · "+s.ch2_preset.toUpperCase();
+  }
   applyChan(1,s.input1);applyChan(2,s.input2);
   if(s.outputs){applyFader("mon",s.outputs.monitor_step);applyFader("hp1",s.outputs.hp1_step);applyFader("hp2",s.outputs.hp2_step);
     const mt=document.getElementById("muteTag"),mb=document.querySelector('[data-tog="mute"]');

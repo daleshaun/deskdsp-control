@@ -18,10 +18,16 @@
 #![allow(dead_code)]
 
 use super::biquad::{BiquadFilter, FilterType};
+use super::cab_sim::CabSim;
+use super::chorus::ChorusNode;
 use super::compressor::VocalCompressor;
 use super::deesser::DeEsser;
+use super::drive::DriveNode;
+use super::exciter::HarmonicExciter;
 use super::gate::NoiseGate;
+use super::guitar_amp::GuitarAmp;
 use super::rack::MonoRack;
+use super::reverb::ReverbNode;
 use super::saturation::Saturation;
 use super::tuner::VocalTuner;
 use super::DspNode;
@@ -218,5 +224,47 @@ impl ChannelStrip {
     }
     pub fn saturation_mut(&mut self) -> Option<&mut Saturation> {
         self.rack.find_node_mut::<Saturation>()
+    }
+
+    pub fn amp(&self) -> Option<&GuitarAmp> {
+        self.rack.find_node::<GuitarAmp>()
+    }
+    pub fn amp_mut(&mut self) -> Option<&mut GuitarAmp> {
+        self.rack.find_node_mut::<GuitarAmp>()
+    }
+
+    pub fn cab(&self) -> Option<&CabSim> {
+        self.rack.find_node::<CabSim>()
+    }
+    pub fn cab_mut(&mut self) -> Option<&mut CabSim> {
+        self.rack.find_node_mut::<CabSim>()
+    }
+
+    pub fn drive(&self) -> Option<&DriveNode> {
+        self.rack.find_node::<DriveNode>()
+    }
+    pub fn drive_mut(&mut self) -> Option<&mut DriveNode> {
+        self.rack.find_node_mut::<DriveNode>()
+    }
+
+    pub fn chorus(&self) -> Option<&ChorusNode> {
+        self.rack.find_node::<ChorusNode>()
+    }
+    pub fn chorus_mut(&mut self) -> Option<&mut ChorusNode> {
+        self.rack.find_node_mut::<ChorusNode>()
+    }
+
+    pub fn reverb(&self) -> Option<&ReverbNode> {
+        self.rack.find_node::<ReverbNode>()
+    }
+    pub fn reverb_mut(&mut self) -> Option<&mut ReverbNode> {
+        self.rack.find_node_mut::<ReverbNode>()
+    }
+
+    pub fn exciter(&self) -> Option<&HarmonicExciter> {
+        self.rack.find_node::<HarmonicExciter>()
+    }
+    pub fn exciter_mut(&mut self) -> Option<&mut HarmonicExciter> {
+        self.rack.find_node_mut::<HarmonicExciter>()
     }
 }

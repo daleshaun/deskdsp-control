@@ -25,11 +25,23 @@ pub mod exciter;
 pub mod lv2_host;
 pub mod channel_strip;
 pub mod master_chain;
+pub mod guitar_amp;
+pub mod cab_sim;
+pub mod drive;
+pub mod chorus;
+pub mod reverb;
+pub mod presets;
 
 pub use channel_strip::ChannelStrip;
 pub use master_chain::MasterChain;
 pub use rack::{MonoRack, StereoRack};
 pub use lv2_host::{Lv2Host, Lv2Node};
+pub use guitar_amp::GuitarAmp;
+pub use cab_sim::{CabSim, CabType};
+pub use drive::DriveNode;
+pub use chorus::ChorusNode;
+pub use reverb::ReverbNode;
+pub use presets::{InstrumentPreset, build_rack, suggested_input};
 
 /// Real-time node telemetry for UI and meters without heap allocations.
 #[derive(Debug, Clone, Copy, Default)]

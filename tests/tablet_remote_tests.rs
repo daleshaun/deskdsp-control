@@ -411,6 +411,12 @@ fn test_remote_messages_serde_protocol() {
         },
         global_bypass: true,
         source_mode: "program".into(),
+        ch1_preset: "vocal".into(),
+        ch2_preset: "eguitar".into(),
+        ch1_suggested_mode: "Mic".into(),
+        ch1_suggested_phantom: true,
+        ch2_suggested_mode: "HiZ".into(),
+        ch2_suggested_phantom: false,
     };
 
     let serialized = serde_json::to_string(&sync_msg).unwrap();
@@ -423,6 +429,9 @@ fn test_remote_messages_serde_protocol() {
     assert!(serialized.contains(r#""true_peak_dbtp":-1.0"#));
     assert!(serialized.contains(r#""global_bypass":true"#));
     assert!(serialized.contains(r#""source_mode":"program""#));
+    assert!(serialized.contains(r#""ch1_preset":"vocal""#));
+    assert!(serialized.contains(r#""ch2_preset":"eguitar""#));
+    assert!(serialized.contains(r#""ch2_suggested_mode":"HiZ""#));
 
     // 9. SetDspParam message
     let dsp_param_json = r#"{"type":"set_dsp_param","target":"ch1","param":"comp_attack","value":15.5}"#;
@@ -467,6 +476,17 @@ fn test_remote_messages_serde_protocol() {
             assert_eq!(mode, "vocal");
         }
         _ => panic!("Expected SetSourceMode"),
+    }
+
+    // 13. SetChannelPreset message
+    let preset_json = r#"{"type":"set_channel_preset","target":"ch1","preset":"eguitar"}"#;
+    let msg: RemoteMessage = serde_json::from_str(preset_json).unwrap();
+    match msg {
+        RemoteMessage::SetChannelPreset { target, preset } => {
+            assert_eq!(target, "ch1");
+            assert_eq!(preset, "eguitar");
+        }
+        _ => panic!("Expected SetChannelPreset"),
     }
 }
 

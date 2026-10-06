@@ -175,6 +175,7 @@ fn main() -> Result<()> {
         let engine_producers = audio.take_command_producers();
         let port = args.remote_port;
         let token = args.remote_token.clone();
+        let sample_rate = audio.sample_rate as f32;
         let (tx_forwarder, rx_forwarder) = std::sync::mpsc::channel();
 
         std::thread::Builder::new()
@@ -182,7 +183,7 @@ fn main() -> Result<()> {
             .spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to initialize tokio runtime");
                 rt.block_on(async move {
-                    let server = remote::TabletRemoteServer::new(
+                    let server = remote::TabletRemoteServer::with_sample_rate(
                         hw_remote,
                         meters_remote,
                         bypass_remote,
@@ -190,6 +191,7 @@ fn main() -> Result<()> {
                         engine_producers,
                         port,
                         token,
+                        sample_rate,
                     );
                     let _ = tx_forwarder.send(server.dsp_command_sender());
                     if let Err(e) = server.run().await {

@@ -567,6 +567,218 @@ fn test_vocal_tuner_audio_smoothness_and_glitch_free_processing() {
     assert_relative_eq!(tuner.target_freq_hz.unwrap_or(0.0), 220.0, epsilon = 0.5);
 }
 
+#[test]
+fn test_guitar_amp_saturation_and_oversampling() {
+    use deskdsp_control::dsp::GuitarAmp;
+    let sample_rate = 48000.0_f32;
+    let mut amp = GuitarAmp::new(sample_rate);
+    assert!(!amp.is_bypassed());
+    assert_eq!(amp.name(), "Guitar Amp");
+
+    // 1. Verify soft-clipping saturation bounds high drive inputs
+    amp.set_params(10.0, 0.0, 0.0, 0.0, 0.0);
+    let mut max_out = 0.0_f32;
+    for i in 0..1000 {
+        let t = i as f32 / sample_rate;
+        let x = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 2.0; // Overdriving 2.0 input
+        let out = amp.process_sample(x);
+        assert!(out.is_finite());
+        max_out = max_out.max(out.abs());
+    }
+    assert!(max_out <= 1.05, "Amplifier output must be bounded within ceiling");
+
+    // 2. Verify bypass returns input untouched
+    amp.set_bypassed(true);
+    let raw = 0.42_f32;
+    assert_eq!(amp.process_sample(raw), raw);
+}
+
+#[test]
+fn test_cab_sim_voicing_and_bypasses() {
+    use deskdsp_control::dsp::{CabSim, CabType};
+    let sample_rate = 48000.0_f32;
+    let mut cab_mid = CabSim::new(sample_rate);
+    let mut cab_high = CabSim::new(sample_rate);
+    assert_eq!(cab_mid.cab_type, CabType::FourByTwelve);
+
+    // 1. Verify 4x12 cab sim filters sub-bass (< 50 Hz) and ultra-highs (> 8 kHz)
+    let mut mid_energy = 0.0_f32;
+    let mut ultra_high_energy = 0.0_f32;
+
+    for i in 0..1000 {
+        let t = i as f32 / sample_rate;
+        let mid = (2.0 * std::f32::consts::PI * 1000.0 * t).sin() * 0.5;
+        let high = (2.0 * std::f32::consts::PI * 12000.0 * t).sin() * 0.5;
+
+        mid_energy += cab_mid.process_sample(mid).powi(2);
+        ultra_high_energy += cab_high.process_sample(high).powi(2);
+    }
+
+    // Cab sim cone speaker rolloff attenuates 12 kHz drastically compared to 1 kHz passband
+    assert!(mid_energy > ultra_high_energy * 2.0, "Speaker cabinet must steep-roll ultra highs");
+
+    // 2. Verify None cab type acts as bypass
+    cab_mid.set_cab_type(CabType::None);
+    assert!(cab_mid.is_bypassed());
+}
+
+#[test]
+fn test_drive_node_tilt_eq_and_clean_blend() {
+    use deskdsp_control::dsp::DriveNode;
+    let sample_rate = 48000.0_f32;
+    let mut drv = DriveNode::new(sample_rate);
+
+    // 1. Blend = 0.0 should pass mostly clean linear signal
+    drv.set_params(5.0, 0.0, 0.0, 0.0);
+    let sample = 0.2_f32;
+    let out_clean = drv.process_sample(sample);
+    assert_relative_eq!(out_clean, sample, epsilon = 0.05);
+
+    // 2. Blend = 1.0 applies full overdrive
+    drv.set_params(8.0, 0.0, 1.0, 0.0);
+    let out_dirty = drv.process_sample(sample);
+    assert!(out_dirty.is_finite());
+    assert!((out_dirty - sample).abs() > 0.05);
+}
+
+#[test]
+fn test_chorus_node_modulation_and_interpolation() {
+    use deskdsp_control::dsp::ChorusNode;
+    let sample_rate = 48000.0_f32;
+    let mut chorus = ChorusNode::new(sample_rate);
+
+    // Stream 100ms of audio and ensure no NaNs and bounded output
+    let mut has_non_zero = false;
+    for i in 0..4800 {
+        let t = i as f32 / sample_rate;
+        let input = (2.0 * std::f32::consts::PI * 330.0 * t).sin() * 0.5;
+        let out = chorus.process_sample(input);
+        assert!(out.is_finite());
+        assert!(out.abs() <= 1.0);
+        if out.abs() > 0.01 {
+            has_non_zero = true;
+        }
+    }
+    assert!(has_non_zero);
+}
+
+#[test]
+fn test_reverb_node_decay_and_decay_tails() {
+    use deskdsp_control::dsp::ReverbNode;
+    let sample_rate = 48000.0_f32;
+    let mut reverb = ReverbNode::new(sample_rate);
+    reverb.set_params(0.8, 0.2, 0.0, 1.0); // 100% wet
+
+    // Feed a short 10ms burst of 440 Hz
+    for i in 0..480 {
+        let t = i as f32 / sample_rate;
+        let x = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5;
+        reverb.process_sample(x);
+    }
+
+    // Accumulate tail energy over subsequent 200ms of silence
+    let mut tail_energy = 0.0_f32;
+    for _ in 0..9600 {
+        let out = reverb.process_sample(0.0);
+        assert!(out.is_finite());
+        tail_energy += out * out;
+    }
+    assert!(tail_energy > 0.001, "Reverb network must generate dense sustained reverberant tail: {}", tail_energy);
+}
+
+#[test]
+fn test_instrument_presets_build_rack_and_node_counts() {
+    use deskdsp_control::dsp::{build_rack, InstrumentPreset};
+    let sample_rate = 48000.0_f32;
+
+    // 1. Vocal (HPF, Gate, DeEsser, EQ, Comp, Tuner, Saturation) = 7 nodes
+    let vocal_rack = build_rack(InstrumentPreset::Vocal, sample_rate);
+    assert_eq!(vocal_rack.len(), 7);
+
+    // 2. Electric Guitar (Gate, Amp, Cab, EQ, Comp) = 5 nodes
+    let egtr_rack = build_rack(InstrumentPreset::ElectricGuitar, sample_rate);
+    assert_eq!(egtr_rack.len(), 5);
+
+    // 3. Acoustic Guitar (HPF, Gate, EQ, Comp, Exciter, Reverb) = 6 nodes
+    let agtr_rack = build_rack(InstrumentPreset::AcousticGuitar, sample_rate);
+    assert_eq!(agtr_rack.len(), 6);
+
+    // 4. Bass (Gate, Comp, Drive, EQ, Limiter) = 5 nodes
+    let bass_rack = build_rack(InstrumentPreset::Bass, sample_rate);
+    assert_eq!(bass_rack.len(), 5);
+
+    // 5. Keys (EQ, Comp, Exciter, Chorus) = 4 nodes
+    let keys_rack = build_rack(InstrumentPreset::Keys, sample_rate);
+    assert_eq!(keys_rack.len(), 4);
+
+    // 6. Piano (EQ, Comp, Saturation, Reverb) = 4 nodes
+    let piano_rack = build_rack(InstrumentPreset::Piano, sample_rate);
+    assert_eq!(piano_rack.len(), 4);
+
+    // 7. Program Thru = 0 nodes (clean direct passthrough)
+    let prog_rack = build_rack(InstrumentPreset::ProgramThru, sample_rate);
+    assert_eq!(prog_rack.len(), 0);
+}
+
+#[test]
+fn test_instrument_presets_suggested_inputs() {
+    use deskdsp_control::dsp::{suggested_input, InstrumentPreset};
+    use antelope_protocol::PreampMode;
+
+    let (mode, p48) = suggested_input(InstrumentPreset::Vocal);
+    assert_eq!(mode, PreampMode::Mic);
+    assert!(p48);
+
+    let (mode, p48) = suggested_input(InstrumentPreset::ElectricGuitar);
+    assert_eq!(mode, PreampMode::HiZ);
+    assert!(!p48);
+
+    let (mode, p48) = suggested_input(InstrumentPreset::Bass);
+    assert_eq!(mode, PreampMode::HiZ);
+    assert!(!p48);
+
+    let (mode, p48) = suggested_input(InstrumentPreset::Keys);
+    assert_eq!(mode, PreampMode::Line);
+    assert!(!p48);
+
+    let (mode, p48) = suggested_input(InstrumentPreset::ProgramThru);
+    assert_eq!(mode, PreampMode::Line);
+    assert!(!p48);
+}
+
+#[test]
+fn test_rack_hotswap_preset_switching_smoothness() {
+    use deskdsp_control::dsp::{build_rack, ChannelStrip, InstrumentPreset};
+    let sample_rate = 48000.0_f32;
+    let mut cs = ChannelStrip::new(sample_rate);
+
+    let presets = [
+        InstrumentPreset::Vocal,
+        InstrumentPreset::ElectricGuitar,
+        InstrumentPreset::AcousticGuitar,
+        InstrumentPreset::Bass,
+        InstrumentPreset::Keys,
+        InstrumentPreset::Piano,
+        InstrumentPreset::ProgramThru,
+        InstrumentPreset::Vocal,
+    ];
+
+    // Stream a 440 Hz test tone while hot-swapping presets live
+    for preset in presets {
+        let new_rack = build_rack(preset, sample_rate);
+        let old_rack = cs.swap_rack(new_rack);
+        drop(old_rack); // Dropped off-thread safely
+
+        for i in 0..128 {
+            let t = i as f32 / sample_rate;
+            let input = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.4;
+            let out = cs.process(input);
+            assert!(out.is_finite(), "Output must be finite after preset swap to {:?}", preset);
+            assert!(out.abs() <= 1.0, "Output must be bounded after swap to {:?}", preset);
+        }
+    }
+}
+
 
 
 

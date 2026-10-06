@@ -514,3 +514,39 @@ fn test_global_bypass_bit_identical_clean_passthrough() {
         assert_eq!(s.to_bits(), out_r.to_bits());
     }
 }
+
+#[test]
+fn test_preset_swap_audio_thread_zero_allocations_and_safe_garbage_return() {
+    use deskdsp_control::dsp::{build_rack, InstrumentPreset};
+
+    let sample_rate = 48000.0_f32;
+    let mut cs1 = ChannelStrip::new(sample_rate);
+    let mut cs2 = ChannelStrip::new(sample_rate);
+    let (mut garbage_prod, mut garbage_cons) = rtrb::RingBuffer::<AudioGarbage>::new(32);
+
+    // Build new rack OFF the audio thread
+    let new_eguitar_rack = build_rack(InstrumentPreset::ElectricGuitar, sample_rate);
+    let swap_cmd = AudioCommand::SwapMonoRack {
+        target: CommandTarget::Channel1,
+        rack: Box::new(new_eguitar_rack),
+    };
+
+    // PROVE: Swapping rack on audio thread incurs ZERO allocations and ZERO deallocations
+    assert_no_alloc(|| {
+        apply_input_command(swap_cmd, &mut garbage_prod, &mut cs1, &mut cs2);
+        // Process block of audio immediately on new rack with zero allocations
+        for _ in 0..64 {
+            let _ = cs1.process(0.3);
+        }
+    });
+
+    // Verify the retired vocal rack was safely deposited in the garbage queue
+    let mut retired_rack_count = 0;
+    while let Ok(garbage) = garbage_cons.pop() {
+        if let AudioGarbage::MonoRack(retired_box) = garbage {
+            assert_eq!(retired_box.len(), 7); // Original vocal strip had 7 nodes
+            retired_rack_count += 1;
+        }
+    }
+    assert_eq!(retired_rack_count, 1, "Retired rack must be pushed to garbage queue for off-thread drop");
+}

@@ -31,12 +31,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::audio::{AudioCommand, AudioMeters, CommandTarget};
+use crate::dsp::presets::{self, InstrumentPreset};
 use crate::dsp::tuner::Scale;
 use crate::hardware::HardwareController;
 use antelope_protocol::PreampMode;
 
 mod assets;
 use assets::{ICON_192_PNG, ICON_512_PNG, MANIFEST_JSON, SW_JS, TABLET_TOUCH_HTML};
+
+fn default_preset_ch1() -> String {
+    "vocal".to_string()
+}
+fn default_preset_ch2() -> String {
+    "vocal".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -51,6 +59,18 @@ pub enum RemoteMessage {
         global_bypass: bool,
         #[serde(default)]
         source_mode: String,
+        #[serde(default = "default_preset_ch1")]
+        ch1_preset: String,
+        #[serde(default = "default_preset_ch2")]
+        ch2_preset: String,
+        #[serde(default)]
+        ch1_suggested_mode: String,
+        #[serde(default)]
+        ch1_suggested_phantom: bool,
+        #[serde(default)]
+        ch2_suggested_mode: String,
+        #[serde(default)]
+        ch2_suggested_phantom: bool,
     },
     #[serde(rename = "set_gain")]
     SetGain { input: u8, gain_db: u8 },
@@ -90,6 +110,11 @@ pub enum RemoteMessage {
     SetTunerScale {
         target: String,
         scale: String,
+    },
+    #[serde(rename = "set_channel_preset")]
+    SetChannelPreset {
+        target: String,
+        preset: String,
     },
 }
 
@@ -141,6 +166,9 @@ struct AppState {
     meters: Arc<AudioMeters>,
     global_bypass: Arc<AtomicBool>,
     source_mode: Arc<AtomicBool>,
+    ch1_preset: Arc<std::sync::RwLock<String>>,
+    ch2_preset: Arc<std::sync::RwLock<String>>,
+    sample_rate: f32,
     cmd_tx: std::sync::mpsc::Sender<CoalescedHidCommand>,
     dsp_cmd_tx: std::sync::mpsc::Sender<AudioCommand>,
     broadcast_tx: broadcast::Sender<String>,
@@ -154,6 +182,7 @@ pub struct TabletRemoteServer {
 }
 
 impl TabletRemoteServer {
+    #[allow(dead_code)]
     pub fn new(
         hw: Option<HardwareController>,
         meters: Arc<AudioMeters>,
@@ -162,6 +191,28 @@ impl TabletRemoteServer {
         engine_producers: Option<(rtrb::Producer<AudioCommand>, rtrb::Producer<AudioCommand>)>,
         port: u16,
         token: Option<String>,
+    ) -> Self {
+        Self::with_sample_rate(
+            hw,
+            meters,
+            global_bypass,
+            source_mode,
+            engine_producers,
+            port,
+            token,
+            48000.0,
+        )
+    }
+
+    pub fn with_sample_rate(
+        hw: Option<HardwareController>,
+        meters: Arc<AudioMeters>,
+        global_bypass: Arc<AtomicBool>,
+        source_mode: Arc<AtomicBool>,
+        engine_producers: Option<(rtrb::Producer<AudioCommand>, rtrb::Producer<AudioCommand>)>,
+        port: u16,
+        token: Option<String>,
+        sample_rate: f32,
     ) -> Self {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CoalescedHidCommand>();
         let (dsp_cmd_tx, dsp_cmd_rx) = std::sync::mpsc::channel::<AudioCommand>();
@@ -256,6 +307,9 @@ impl TabletRemoteServer {
             meters,
             global_bypass,
             source_mode,
+            ch1_preset: Arc::new(std::sync::RwLock::new("vocal".to_string())),
+            ch2_preset: Arc::new(std::sync::RwLock::new("vocal".to_string())),
+            sample_rate,
             cmd_tx,
             dsp_cmd_tx,
             broadcast_tx,
@@ -287,6 +341,8 @@ impl TabletRemoteServer {
         let bcast_tx = state.broadcast_tx.clone();
         let bypass_sync = Arc::clone(&state.global_bypass);
         let source_mode_sync = Arc::clone(&state.source_mode);
+        let ch1_preset_sync = Arc::clone(&state.ch1_preset);
+        let ch2_preset_sync = Arc::clone(&state.ch2_preset);
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(50)); // 20Hz sync
@@ -337,6 +393,15 @@ impl TabletRemoteServer {
                 let integrated_lufs = AudioMeters::load_f32(&meters_sync.integrated_lufs);
                 let true_peak_dbtp = AudioMeters::load_f32(&meters_sync.master_true_peak_dbtp);
 
+                let ch1_str = ch1_preset_sync.read().map(|g| g.clone()).unwrap_or_else(|_| "vocal".into());
+                let ch2_str = ch2_preset_sync.read().map(|g| g.clone()).unwrap_or_else(|_| "vocal".into());
+
+                let p1 = InstrumentPreset::parse_str(&ch1_str).unwrap_or(InstrumentPreset::Vocal);
+                let p2 = InstrumentPreset::parse_str(&ch2_str).unwrap_or(InstrumentPreset::Vocal);
+
+                let (sug1_mode, sug1_48v) = presets::suggested_input(p1);
+                let (sug2_mode, sug2_48v) = presets::suggested_input(p2);
+
                 let msg = RemoteMessage::StateSync {
                     input1,
                     input2,
@@ -353,6 +418,12 @@ impl TabletRemoteServer {
                     },
                     global_bypass: bypass_sync.load(Ordering::Relaxed),
                     source_mode: if source_mode_sync.load(Ordering::Relaxed) { "program".into() } else { "vocal".into() },
+                    ch1_preset: ch1_str,
+                    ch2_preset: ch2_str,
+                    ch1_suggested_mode: format!("{:?}", sug1_mode),
+                    ch1_suggested_phantom: sug1_48v,
+                    ch2_suggested_mode: format!("{:?}", sug2_mode),
+                    ch2_suggested_phantom: sug2_48v,
                 };
 
                 if let Ok(json_str) = serde_json::to_string(&msg) {
@@ -556,14 +627,18 @@ async fn status_handler(
     }
 
     let hw_online = state.hw.is_some();
+    let ch1_str = state.ch1_preset.read().map(|g| g.clone()).unwrap_or_else(|_| "vocal".into());
+    let ch2_str = state.ch2_preset.read().map(|g| g.clone()).unwrap_or_else(|_| "vocal".into());
     Json(serde_json::json!({
         "status": "online",
         "hardware_detected": hw_online,
-        "sample_rate": 48000,
+        "sample_rate": state.sample_rate as u32,
         "service": "DeskDSP Control Wireless Tablet Remote",
         "token_required": state.token.is_some(),
         "global_bypass": state.global_bypass.load(Ordering::Relaxed),
-        "source_mode": if state.source_mode.load(Ordering::Relaxed) { "program" } else { "vocal" }
+        "source_mode": if state.source_mode.load(Ordering::Relaxed) { "program" } else { "vocal" },
+        "ch1_preset": ch1_str,
+        "ch2_preset": ch2_str,
     }))
     .into_response()
 }
@@ -680,6 +755,12 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     "comp" => "comp",
                                     "tuner" => "tuner",
                                     "sat" => "sat",
+                                    "amp" => "amp",
+                                    "cab" => "cab",
+                                    "drive" => "drive",
+                                    "chorus" => "chorus",
+                                    "reverb" => "reverb",
+                                    "exciter" => "exciter",
                                     "master_eq" => "master_eq",
                                     "multiband" => "multiband",
                                     "stereo_width" | "width" => "stereo_width",
@@ -727,6 +808,58 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             RemoteMessage::SetSourceMode { mode } => {
                                 let is_prog = mode.to_lowercase() == "program";
                                 state.source_mode.store(is_prog, Ordering::Relaxed);
+                                let preset = if is_prog { InstrumentPreset::ProgramThru } else { InstrumentPreset::Vocal };
+                                if let Ok(mut lock) = state.ch1_preset.write() {
+                                    *lock = preset.as_str().to_string();
+                                }
+                                if let Ok(mut lock) = state.ch2_preset.write() {
+                                    *lock = preset.as_str().to_string();
+                                }
+                                let sample_rate = state.sample_rate;
+                                let rack1 = presets::build_rack(preset, sample_rate);
+                                let rack2 = presets::build_rack(preset, sample_rate);
+                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                                    target: CommandTarget::Channel1,
+                                    rack: Box::new(rack1),
+                                });
+                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                                    target: CommandTarget::Channel2,
+                                    rack: Box::new(rack2),
+                                });
+                            }
+                            RemoteMessage::SetChannelPreset { target, preset } => {
+                                let preset_variant = InstrumentPreset::parse_str(&preset).unwrap_or(InstrumentPreset::Vocal);
+                                let sample_rate = state.sample_rate;
+                                // Build rack OFF the audio thread:
+                                let new_rack = presets::build_rack(preset_variant, sample_rate);
+                                let cmd_target = match target.to_lowercase().as_str() {
+                                    "ch1" | "1" | "input1" => {
+                                        if let Ok(mut lock) = state.ch1_preset.write() {
+                                            *lock = preset_variant.as_str().to_string();
+                                        }
+                                        CommandTarget::Channel1
+                                    }
+                                    "ch2" | "2" | "input2" => {
+                                        if let Ok(mut lock) = state.ch2_preset.write() {
+                                            *lock = preset_variant.as_str().to_string();
+                                        }
+                                        CommandTarget::Channel2
+                                    }
+                                    _ => continue,
+                                };
+
+                                let ch1_is_prog = state.ch1_preset.read().map(|g| *g == "program").unwrap_or(false);
+                                let ch2_is_prog = state.ch2_preset.read().map(|g| *g == "program").unwrap_or(false);
+                                if ch1_is_prog && ch2_is_prog {
+                                    state.source_mode.store(true, Ordering::Relaxed);
+                                } else {
+                                    state.source_mode.store(false, Ordering::Relaxed);
+                                }
+
+                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                                    target: cmd_target,
+                                    rack: Box::new(new_rack),
+                                });
                             }
                             RemoteMessage::SetDspParam { target, param, value } => {
                                 let cmd_target = match target.as_str() {
@@ -749,6 +882,13 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     "comp_attack" => "comp_attack",
                                     "comp_release" => "comp_release",
                                     "tuner_retune" => "tuner_retune",
+                                    "amp_drive" => "amp_drive",
+                                    "amp_level" => "amp_level",
+                                    "cab_type" => "cab_type",
+                                    "drive_gain" => "drive_gain",
+                                    "drive_blend" => "drive_blend",
+                                    "chorus_mix" => "chorus_mix",
+                                    "reverb_mix" => "reverb_mix",
                                     "glue_threshold" => "glue_threshold",
                                     "stereo_width" => "stereo_width",
                                     "limiter_ceiling" => "limiter_ceiling",

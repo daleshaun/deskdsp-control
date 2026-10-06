@@ -510,6 +510,12 @@ pub fn apply_input_command(
                     "comp" => { if let Some(n) = cs.compressor_mut() { n.set_bypassed(bypassed); } }
                     "tuner" => { if let Some(n) = cs.tuner_mut() { n.set_bypassed(bypassed); } }
                     "sat" => { if let Some(n) = cs.saturation_mut() { n.set_bypassed(bypassed); } }
+                    "amp" => { if let Some(n) = cs.amp_mut() { n.set_bypassed(bypassed); } }
+                    "cab" => { if let Some(n) = cs.cab_mut() { n.set_bypassed(bypassed); } }
+                    "drive" => { if let Some(n) = cs.drive_mut() { n.set_bypassed(bypassed); } }
+                    "chorus" => { if let Some(n) = cs.chorus_mut() { n.set_bypassed(bypassed); } }
+                    "reverb" => { if let Some(n) = cs.reverb_mut() { n.set_bypassed(bypassed); } }
+                    "exciter" => { if let Some(n) = cs.exciter_mut() { n.set_bypassed(bypassed); } }
                     _ => {}
                 }
             };
@@ -645,6 +651,47 @@ pub fn apply_input_command(
                 "tuner_retune" => {
                     if let Some(tuner) = cs.tuner_mut() {
                         tuner.retune_speed_ms = value.clamp(0.1, 200.0);
+                    }
+                }
+                "amp_drive" => {
+                    if let Some(amp) = cs.amp_mut() {
+                        amp.drive = value.clamp(1.0, 25.0);
+                    }
+                }
+                "amp_level" => {
+                    if let Some(amp) = cs.amp_mut() {
+                        amp.level_db = value.clamp(-24.0, 12.0);
+                    }
+                }
+                "cab_type" => {
+                    if let Some(cab) = cs.cab_mut() {
+                        let ct = match value as u32 {
+                            0 => crate::dsp::CabType::None,
+                            1 => crate::dsp::CabType::OneByTwelve,
+                            2 => crate::dsp::CabType::TwoByTwelve,
+                            _ => crate::dsp::CabType::FourByTwelve,
+                        };
+                        cab.set_cab_type(ct);
+                    }
+                }
+                "drive_gain" => {
+                    if let Some(drv) = cs.drive_mut() {
+                        drv.drive = value.clamp(1.0, 20.0);
+                    }
+                }
+                "drive_blend" => {
+                    if let Some(drv) = cs.drive_mut() {
+                        drv.blend = value.clamp(0.0, 1.0);
+                    }
+                }
+                "chorus_mix" => {
+                    if let Some(cho) = cs.chorus_mut() {
+                        cho.mix = value.clamp(0.0, 1.0);
+                    }
+                }
+                "reverb_mix" => {
+                    if let Some(rev) = cs.reverb_mut() {
+                        rev.set_mix(value.clamp(0.0, 1.0));
                     }
                 }
                 _ => {}
