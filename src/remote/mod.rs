@@ -45,6 +45,9 @@ fn default_preset_ch1() -> String {
 fn default_preset_ch2() -> String {
     "vocal".to_string()
 }
+fn default_voicing() -> String {
+    "flat".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -71,6 +74,14 @@ pub enum RemoteMessage {
         ch2_suggested_mode: String,
         #[serde(default)]
         ch2_suggested_phantom: bool,
+        #[serde(default = "default_voicing")]
+        ch1_voicing: String,
+        #[serde(default = "default_voicing")]
+        ch2_voicing: String,
+        #[serde(default)]
+        ch1_mic_ir_loaded: bool,
+        #[serde(default)]
+        ch2_mic_ir_loaded: bool,
     },
     #[serde(rename = "set_gain")]
     SetGain { input: u8, gain_db: u8 },
@@ -115,6 +126,18 @@ pub enum RemoteMessage {
     SetChannelPreset {
         target: String,
         preset: String,
+    },
+    #[serde(rename = "set_mic_voicing")]
+    SetMicVoicing {
+        target: String,
+        voicing: String,
+    },
+    #[serde(rename = "set_mic_image_ir")]
+    SetMicImageIr {
+        target: String,
+        ir_name: String,
+        #[serde(default)]
+        samples: Option<Vec<f32>>,
     },
 }
 
@@ -168,6 +191,10 @@ struct AppState {
     source_mode: Arc<AtomicBool>,
     ch1_preset: Arc<std::sync::RwLock<String>>,
     ch2_preset: Arc<std::sync::RwLock<String>>,
+    ch1_voicing: Arc<std::sync::RwLock<String>>,
+    ch2_voicing: Arc<std::sync::RwLock<String>>,
+    ch1_mic_ir_loaded: Arc<AtomicBool>,
+    ch2_mic_ir_loaded: Arc<AtomicBool>,
     sample_rate: f32,
     cmd_tx: std::sync::mpsc::Sender<CoalescedHidCommand>,
     dsp_cmd_tx: std::sync::mpsc::Sender<AudioCommand>,
@@ -309,6 +336,10 @@ impl TabletRemoteServer {
             source_mode,
             ch1_preset: Arc::new(std::sync::RwLock::new("vocal".to_string())),
             ch2_preset: Arc::new(std::sync::RwLock::new("vocal".to_string())),
+            ch1_voicing: Arc::new(std::sync::RwLock::new("flat".to_string())),
+            ch2_voicing: Arc::new(std::sync::RwLock::new("flat".to_string())),
+            ch1_mic_ir_loaded: Arc::new(AtomicBool::new(false)),
+            ch2_mic_ir_loaded: Arc::new(AtomicBool::new(false)),
             sample_rate,
             cmd_tx,
             dsp_cmd_tx,
@@ -343,6 +374,10 @@ impl TabletRemoteServer {
         let source_mode_sync = Arc::clone(&state.source_mode);
         let ch1_preset_sync = Arc::clone(&state.ch1_preset);
         let ch2_preset_sync = Arc::clone(&state.ch2_preset);
+        let ch1_voicing_sync = Arc::clone(&state.ch1_voicing);
+        let ch2_voicing_sync = Arc::clone(&state.ch2_voicing);
+        let ch1_ir_sync = Arc::clone(&state.ch1_mic_ir_loaded);
+        let ch2_ir_sync = Arc::clone(&state.ch2_mic_ir_loaded);
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(50)); // 20Hz sync
@@ -402,6 +437,11 @@ impl TabletRemoteServer {
                 let (sug1_mode, sug1_48v) = presets::suggested_input(p1);
                 let (sug2_mode, sug2_48v) = presets::suggested_input(p2);
 
+                let ch1_voicing = ch1_voicing_sync.read().map(|g| g.clone()).unwrap_or_else(|_| "flat".into());
+                let ch2_voicing = ch2_voicing_sync.read().map(|g| g.clone()).unwrap_or_else(|_| "flat".into());
+                let ch1_mic_ir_loaded = ch1_ir_sync.load(Ordering::Relaxed);
+                let ch2_mic_ir_loaded = ch2_ir_sync.load(Ordering::Relaxed);
+
                 let msg = RemoteMessage::StateSync {
                     input1,
                     input2,
@@ -424,6 +464,10 @@ impl TabletRemoteServer {
                     ch1_suggested_phantom: sug1_48v,
                     ch2_suggested_mode: format!("{:?}", sug2_mode),
                     ch2_suggested_phantom: sug2_48v,
+                    ch1_voicing,
+                    ch2_voicing,
+                    ch1_mic_ir_loaded,
+                    ch2_mic_ir_loaded,
                 };
 
                 if let Ok(json_str) = serde_json::to_string(&msg) {
@@ -895,6 +939,7 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     "master_eq_low" => "master_eq_low",
                                     "master_eq_mid" => "master_eq_mid",
                                     "master_eq_high" => "master_eq_high",
+                                    "mic_dry_wet" => "mic_dry_wet",
                                     _ => continue,
                                 };
                                 let _ = state.dsp_cmd_tx.send(AudioCommand::SetParam {
@@ -921,6 +966,54 @@ async fn handle_tablet_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                 let _ = state.dsp_cmd_tx.send(AudioCommand::SetTunerScale {
                                     target: cmd_target,
                                     scale: scale_variant,
+                                });
+                            }
+                            RemoteMessage::SetMicVoicing { target, voicing } => {
+                                let parsed = crate::dsp::MicVoicing::parse_str(&voicing).unwrap_or(crate::dsp::MicVoicing::Flat);
+                                let cmd_target = match target.to_lowercase().as_str() {
+                                    "ch1" | "1" => {
+                                        if let Ok(mut lock) = state.ch1_voicing.write() {
+                                            *lock = parsed.as_str().to_string();
+                                        }
+                                        CommandTarget::Channel1
+                                    }
+                                    "ch2" | "2" => {
+                                        if let Ok(mut lock) = state.ch2_voicing.write() {
+                                            *lock = parsed.as_str().to_string();
+                                        }
+                                        CommandTarget::Channel2
+                                    }
+                                    _ => continue,
+                                };
+                                let _ = state.dsp_cmd_tx.send(AudioCommand::ApplyMicVoicing {
+                                    target: cmd_target,
+                                    voicing: parsed,
+                                });
+                            }
+                            RemoteMessage::SetMicImageIr { target, ir_name, samples } => {
+                                let (cmd_target, flag_ref) = match target.to_lowercase().as_str() {
+                                    "ch1" | "1" => (CommandTarget::Channel1, &state.ch1_mic_ir_loaded),
+                                    "ch2" | "2" => (CommandTarget::Channel2, &state.ch2_mic_ir_loaded),
+                                    _ => continue,
+                                };
+                                let sample_rate = state.sample_rate;
+                                if let Some(s) = samples {
+                                    if !s.is_empty() {
+                                        let rack = crate::dsp::build_vocal_rack_with_mic_image(&s, &ir_name, sample_rate);
+                                        flag_ref.store(true, Ordering::Relaxed);
+                                        let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                                            target: cmd_target,
+                                            rack: Box::new(rack),
+                                        });
+                                        continue;
+                                    }
+                                }
+                                // Unload IR -> restore standard Vocal rack
+                                let rack = presets::build_rack(InstrumentPreset::Vocal, sample_rate);
+                                flag_ref.store(false, Ordering::Relaxed);
+                                let _ = state.dsp_cmd_tx.send(AudioCommand::SwapMonoRack {
+                                    target: cmd_target,
+                                    rack: Box::new(rack),
                                 });
                             }
                             _ => {}

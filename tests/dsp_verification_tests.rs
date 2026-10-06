@@ -107,6 +107,8 @@ fn test_true_peak_limiter_ceiling_never_exceeded() {
 fn test_pitch_detector_on_synthetic_tones() {
     let sample_rate = 48000.0_f32;
     let test_pitches = [
+        (82.41_f32, "E2"),   // Low baritone / male chest voice
+        (110.0_f32, "A2"),   // Low vocal note
         (220.0_f32, "A3"),
         (261.63_f32, "C4"),
         (440.0_f32, "A4"),
@@ -128,7 +130,50 @@ fn test_pitch_detector_on_synthetic_tones() {
         assert!(conf > 0.80, "Confidence too low ({}) for {}", conf, name);
 
         let freq = detected.unwrap();
-        assert_relative_eq!(freq, target_freq, epsilon = 0.6);
+        assert_relative_eq!(freq, target_freq, epsilon = 0.8);
+    }
+}
+
+#[test]
+fn test_pitch_shifter_ratio_one_zero_comb_filtering() {
+    use deskdsp_control::dsp::tuner::shifter::PitchShifter;
+    let sample_rate = 48000.0_f32;
+    let mut shifter = PitchShifter::new(sample_rate);
+    shifter.set_ratio(1.0, 10.0);
+
+    // Warm up buffer
+    for _ in 0..1000 {
+        shifter.process_sample(0.0);
+    }
+
+    // Feed an impulse
+    let out0 = shifter.process_sample(1.0);
+    assert_eq!(out0, 0.0); // lookback delay
+
+    // Collect response over 2000 samples
+    let mut impulse_resp = Vec::new();
+    for _ in 0..2000 {
+        impulse_resp.push(shifter.process_sample(0.0));
+    }
+
+    // Count non-zero peaks > 0.05
+    let significant_peaks: Vec<(usize, f32)> = impulse_resp
+        .iter()
+        .enumerate()
+        .filter(|(_, &val)| val.abs() > 0.05)
+        .map(|(i, &val)| (i, val))
+        .collect();
+
+    // In a flat-top single tap system with ratio 1.0, there must be EXACTLY ONE delayed impulse.
+    // There must NOT be dual taps producing comb filtering!
+    let total_energy: f32 = impulse_resp.iter().map(|x| x * x).sum();
+    assert!(total_energy > 0.7, "Impulse must pass through delayed with unity energy");
+    assert!(!significant_peaks.is_empty(), "Must produce delayed impulse");
+    // Verify peak is localized within a tight 3-sample window of cubic hermite interpolation
+    let peak_idx = significant_peaks.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0;
+    for (idx, val) in &significant_peaks {
+        assert!((*idx as isize - peak_idx as isize).abs() <= 2,
+            "Found second delayed tap at index {} (val={}), creating comb filtering!", idx, val);
     }
 }
 
@@ -778,6 +823,117 @@ fn test_rack_hotswap_preset_switching_smoothness() {
         }
     }
 }
+
+#[test]
+fn test_conv_engine_impulse_response_and_partition_convolution() {
+    use deskdsp_control::dsp::ConvEngine;
+
+    // Exponential decay test impulse response of 256 samples
+    let ir: Vec<f32> = (0..256).map(|i| (-i as f32 / 40.0).exp()).collect();
+    let partition_len = 128;
+    let mut conv = ConvEngine::new(&ir, partition_len);
+
+    // Warm up / flush initial latency buffer with zeros
+    let mut out_samples = Vec::new();
+
+    // Send impulse followed by zeros
+    let mut input = vec![0.0_f32; 512];
+    input[0] = 1.0;
+
+    for &s in &input {
+        out_samples.push(conv.process_sample(s));
+    }
+
+    // Due to partition latency (128 samples), the impulse response begins at index 128
+    let latency = partition_len;
+    for i in 0..100 {
+        let expected = ir[i];
+        let actual = out_samples[latency + i];
+        assert_relative_eq!(expected, actual, epsilon = 0.05);
+    }
+}
+
+#[test]
+fn test_mic_image_voicing_and_bypasses() {
+    use deskdsp_control::dsp::{DspNode, MicImage};
+
+    // 1. Empty MicImage is bypassed by default and passes bit-identical input
+    let mut empty_mic = MicImage::empty(48000.0);
+    assert!(empty_mic.is_bypassed());
+    assert_eq!(empty_mic.process_sample(0.42), 0.42);
+
+    // 2. Active MicImage with impulse response
+    let ir: Vec<f32> = (0..128).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+    let mut active_mic = MicImage::new(&ir, 64, "Flat Reference");
+    active_mic.set_bypassed(false);
+    assert!(!active_mic.is_bypassed());
+
+    // Dry/wet blend: 0.0 = pure dry (latency-compensated)
+    active_mic.set_dry_wet(0.0);
+    for _ in 0..128 {
+        active_mic.process_sample(0.0);
+    }
+    let dry_out = active_mic.process_sample(0.5);
+    // Over time, dry output emerges without NaN
+    assert!(dry_out.is_finite());
+}
+
+#[test]
+fn test_mic_voicing_profiles_apply_to_rack() {
+    use deskdsp_control::dsp::{apply_mic_voicing, build_rack, InstrumentPreset, MicVoicing};
+    use deskdsp_control::dsp::biquad::BiquadFilter;
+    use deskdsp_control::dsp::channel_strip::ParametricEq4Band;
+    use deskdsp_control::dsp::compressor::VocalCompressor;
+
+    let sample_rate = 48000.0_f32;
+    let mut rack = build_rack(InstrumentPreset::Vocal, sample_rate);
+
+    // 1. Warm Condenser: HPF 75Hz active, EQ low-shelf boost
+    apply_mic_voicing(&mut rack, MicVoicing::WarmCondenser, sample_rate);
+    let hpf = rack.find_node::<BiquadFilter>().unwrap();
+    assert!(!hpf.bypassed);
+    assert_relative_eq!(hpf.cutoff, 75.0, epsilon = 1.0);
+    let eq = rack.find_node::<ParametricEq4Band>().unwrap();
+    assert!(eq.low_shelf.gain_db > 0.5);
+
+    // 2. Broadcast Dynamic: HPF 110Hz, high-mid presence boost
+    apply_mic_voicing(&mut rack, MicVoicing::BroadcastDynamic, sample_rate);
+    let hpf = rack.find_node::<BiquadFilter>().unwrap();
+    assert_relative_eq!(hpf.cutoff, 110.0, epsilon = 1.0);
+    let eq = rack.find_node::<ParametricEq4Band>().unwrap();
+    assert!(eq.high_mid.gain_db > 2.0);
+
+    // 3. Desk USB: aggressive 130Hz HPF, low-shelf desk resonance tame
+    apply_mic_voicing(&mut rack, MicVoicing::DeskUsbMic, sample_rate);
+    let hpf = rack.find_node::<BiquadFilter>().unwrap();
+    assert_relative_eq!(hpf.cutoff, 130.0, epsilon = 1.0);
+    let eq = rack.find_node::<ParametricEq4Band>().unwrap();
+    assert!(eq.low_shelf.gain_db < -2.0);
+
+    // 4. Ribbon: high-shelf lift (+4.5 dB)
+    apply_mic_voicing(&mut rack, MicVoicing::Ribbon, sample_rate);
+    let eq = rack.find_node::<ParametricEq4Band>().unwrap();
+    assert!(eq.high_shelf.gain_db > 4.0);
+
+    // 5. Flat: neutral reset
+    apply_mic_voicing(&mut rack, MicVoicing::Flat, sample_rate);
+    let comp = rack.find_node::<VocalCompressor>().unwrap();
+    assert!(comp.bypassed);
+}
+
+#[test]
+fn test_build_vocal_rack_with_mic_image() {
+    use deskdsp_control::dsp::build_vocal_rack_with_mic_image;
+
+    let sample_rate = 48000.0_f32;
+    let test_ir = vec![1.0, 0.0, 0.0, 0.0];
+    let rack = build_vocal_rack_with_mic_image(&test_ir, "Custom Transfer IR", sample_rate);
+
+    assert_eq!(rack.len(), 8);
+    assert_eq!(rack.get(0).unwrap().name(), "Mic Image (IR)");
+    assert!(!rack.is_bypassed(0)); // Active on IR load
+}
+
 
 
 

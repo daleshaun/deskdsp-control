@@ -550,3 +550,27 @@ fn test_preset_swap_audio_thread_zero_allocations_and_safe_garbage_return() {
     }
     assert_eq!(retired_rack_count, 1, "Retired rack must be pushed to garbage queue for off-thread drop");
 }
+
+#[test]
+fn test_conv_engine_and_mic_image_zero_allocations() {
+    use deskdsp_control::dsp::{ConvEngine, MicImage};
+
+    // Preallocate IR and engine OFF the audio thread
+    let ir: Vec<f32> = (0..512).map(|i| (-i as f32 / 100.0).exp()).collect();
+    let mut conv = ConvEngine::new(&ir, 128);
+    let mut mic = MicImage::new(&ir, 128, "Test Mic");
+    mic.set_bypassed(false);
+
+    let mut block = [0.25_f32; 128];
+
+    // PROVE: Convolution processing loop incurs ZERO allocations
+    assert_no_alloc(|| {
+        for s in block.iter_mut() {
+            *s = conv.process_sample(*s);
+        }
+        for s in block.iter_mut() {
+            *s = mic.process_sample(*s);
+        }
+    });
+}
+

@@ -19,6 +19,8 @@ axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors"] }
+realfft = "3.5.0"
+rustfft = "6.4.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 livi = { version = "0.7", optional = true }
 

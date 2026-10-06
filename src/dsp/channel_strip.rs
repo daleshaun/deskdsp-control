@@ -26,6 +26,7 @@ use super::drive::DriveNode;
 use super::exciter::HarmonicExciter;
 use super::gate::NoiseGate;
 use super::guitar_amp::GuitarAmp;
+use super::mic_image::MicImage;
 use super::rack::MonoRack;
 use super::reverb::ReverbNode;
 use super::saturation::Saturation;
@@ -177,6 +178,13 @@ impl ChannelStrip {
     }
 
     // Typed node accessors for telemetry & hotkey adjustments
+    pub fn mic_image(&self) -> Option<&MicImage> {
+        self.rack.find_node::<MicImage>()
+    }
+    pub fn mic_image_mut(&mut self) -> Option<&mut MicImage> {
+        self.rack.find_node_mut::<MicImage>()
+    }
+
     pub fn hpf(&self) -> Option<&BiquadFilter> {
         self.rack.find_node::<BiquadFilter>()
     }

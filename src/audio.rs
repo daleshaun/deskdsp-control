@@ -52,6 +52,7 @@ pub enum AudioCommand {
     SwapStereoRack { target: CommandTarget, rack: Box<StereoRack> },
     SetParam { target: CommandTarget, param_id: &'static str, value: f32 },
     SetTunerScale { target: CommandTarget, scale: Scale },
+    ApplyMicVoicing { target: CommandTarget, voicing: crate::dsp::MicVoicing },
     ResetAll { target: CommandTarget },
 }
 
@@ -516,6 +517,7 @@ pub fn apply_input_command(
                     "chorus" => { if let Some(n) = cs.chorus_mut() { n.set_bypassed(bypassed); } }
                     "reverb" => { if let Some(n) = cs.reverb_mut() { n.set_bypassed(bypassed); } }
                     "exciter" => { if let Some(n) = cs.exciter_mut() { n.set_bypassed(bypassed); } }
+                    "mic_image" | "mic" => { if let Some(n) = cs.mic_image_mut() { n.set_bypassed(bypassed); } }
                     _ => {}
                 }
             };
@@ -583,6 +585,13 @@ pub fn apply_input_command(
         AudioCommand::SwapStereoRack { rack, .. } => {
             if let Err(rtrb::PushError::Full(g)) = garbage_producer.push(AudioGarbage::StereoRack(rack)) {
                 std::mem::forget(g);
+            }
+        }
+        AudioCommand::ApplyMicVoicing { target, voicing } => {
+            if target == CommandTarget::Channel1 || target == CommandTarget::Channel2 {
+                let cs = if target == CommandTarget::Channel1 { cs1 } else { cs2 };
+                let sr = cs.sample_rate;
+                crate::dsp::apply_mic_voicing(&mut cs.rack, voicing, sr);
             }
         }
         AudioCommand::SetParam { target, param_id, value } => {
@@ -692,6 +701,11 @@ pub fn apply_input_command(
                 "reverb_mix" => {
                     if let Some(rev) = cs.reverb_mut() {
                         rev.set_mix(value.clamp(0.0, 1.0));
+                    }
+                }
+                "mic_dry_wet" => {
+                    if let Some(mic) = cs.mic_image_mut() {
+                        mic.set_dry_wet(value);
                     }
                 }
                 _ => {}

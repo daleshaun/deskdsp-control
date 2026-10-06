@@ -417,6 +417,10 @@ fn test_remote_messages_serde_protocol() {
         ch1_suggested_phantom: true,
         ch2_suggested_mode: "HiZ".into(),
         ch2_suggested_phantom: false,
+        ch1_voicing: "warm_condenser".into(),
+        ch2_voicing: "flat".into(),
+        ch1_mic_ir_loaded: true,
+        ch2_mic_ir_loaded: false,
     };
 
     let serialized = serde_json::to_string(&sync_msg).unwrap();
@@ -432,6 +436,8 @@ fn test_remote_messages_serde_protocol() {
     assert!(serialized.contains(r#""ch1_preset":"vocal""#));
     assert!(serialized.contains(r#""ch2_preset":"eguitar""#));
     assert!(serialized.contains(r#""ch2_suggested_mode":"HiZ""#));
+    assert!(serialized.contains(r#""ch1_voicing":"warm_condenser""#));
+    assert!(serialized.contains(r#""ch1_mic_ir_loaded":true"#));
 
     // 9. SetDspParam message
     let dsp_param_json = r#"{"type":"set_dsp_param","target":"ch1","param":"comp_attack","value":15.5}"#;
@@ -487,6 +493,29 @@ fn test_remote_messages_serde_protocol() {
             assert_eq!(preset, "eguitar");
         }
         _ => panic!("Expected SetChannelPreset"),
+    }
+
+    // 14. SetMicVoicing message
+    let voicing_json = r#"{"type":"set_mic_voicing","target":"ch1","voicing":"broadcast_dynamic"}"#;
+    let msg: RemoteMessage = serde_json::from_str(voicing_json).unwrap();
+    match msg {
+        RemoteMessage::SetMicVoicing { target, voicing } => {
+            assert_eq!(target, "ch1");
+            assert_eq!(voicing, "broadcast_dynamic");
+        }
+        _ => panic!("Expected SetMicVoicing"),
+    }
+
+    // 15. SetMicImageIr message
+    let mic_ir_json = r#"{"type":"set_mic_image_ir","target":"ch1","ir_name":"sm7b_transfer.wav","samples":[0.5,-0.2,0.1]}"#;
+    let msg: RemoteMessage = serde_json::from_str(mic_ir_json).unwrap();
+    match msg {
+        RemoteMessage::SetMicImageIr { target, ir_name, samples } => {
+            assert_eq!(target, "ch1");
+            assert_eq!(ir_name, "sm7b_transfer.wav");
+            assert_eq!(samples.unwrap().len(), 3);
+        }
+        _ => panic!("Expected SetMicImageIr"),
     }
 }
 

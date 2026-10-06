@@ -31,6 +31,9 @@ pub mod drive;
 pub mod chorus;
 pub mod reverb;
 pub mod presets;
+pub mod conv_engine;
+pub mod mic_image;
+pub mod mic_voicing;
 
 pub use channel_strip::ChannelStrip;
 pub use master_chain::MasterChain;
@@ -41,7 +44,10 @@ pub use cab_sim::{CabSim, CabType};
 pub use drive::DriveNode;
 pub use chorus::ChorusNode;
 pub use reverb::ReverbNode;
-pub use presets::{InstrumentPreset, build_rack, suggested_input};
+pub use presets::{InstrumentPreset, build_rack, build_vocal_rack_with_mic_image, suggested_input};
+pub use conv_engine::ConvEngine;
+pub use mic_image::MicImage;
+pub use mic_voicing::{MicVoicing, apply_mic_voicing};
 
 /// Real-time node telemetry for UI and meters without heap allocations.
 #[derive(Debug, Clone, Copy, Default)]

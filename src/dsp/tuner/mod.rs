@@ -32,16 +32,17 @@ pub struct VocalTuner {
     frame_counter: usize,
     hop_size: usize,
 
-    // Signal level tracking (smooth RMS/peak envelope)
+    // Signal level tracking (smooth RMS envelope follower)
     rms_env: f32,
 
-    // 3-point median filter on detected frequency for rock-solid stability
-    pitch_history: [f32; 3],
+    // 5-point median filter on detected frequency for rock-solid stability
+    pitch_history: [f32; 5],
     history_idx: usize,
     history_count: usize,
 
-    // Voiced tracking state
-    voiced_counter: usize,
+    // Voiced tracking state machine with Schmitt trigger hysteresis
+    is_voiced: bool,
+    unvoiced_debounce: usize,
 }
 
 impl VocalTuner {
@@ -62,10 +63,11 @@ impl VocalTuner {
             frame_counter: 0,
             hop_size: 128,         // pitch analysis hop size (~2.6ms at 48kHz)
             rms_env: 0.0,
-            pitch_history: [0.0; 3],
+            pitch_history: [0.0; 5],
             history_idx: 0,
             history_count: 0,
-            voiced_counter: 0,
+            is_voiced: false,
+            unvoiced_debounce: 0,
         }
     }
 
@@ -94,6 +96,7 @@ impl DspNode for VocalTuner {
     }
 
     fn reset(&mut self) {
+        self.detector.reset();
         self.shifter.reset();
         self.detected_freq_hz = None;
         self.target_freq_hz = None;
@@ -103,7 +106,8 @@ impl DspNode for VocalTuner {
         self.frame_counter = 0;
         self.rms_env = 0.0;
         self.history_count = 0;
-        self.voiced_counter = 0;
+        self.is_voiced = false;
+        self.unvoiced_debounce = 0;
     }
 
     #[inline(always)]
@@ -128,21 +132,33 @@ impl DspNode for VocalTuner {
             let (pitch_opt, conf) = self.detector.detect_pitch();
             self.confidence = conf;
 
-            let signal_present = self.rms_env > 0.003; // > -50 dBFS
+            let signal_present = self.rms_env > 0.002; // > -54 dBFS
 
-            if let Some(raw_f) = pitch_opt {
-                if conf >= 0.70 && signal_present && raw_f >= 75.0 && raw_f <= 900.0 {
-                    // Push to 3-point median filter for outlier rejection
+            // Schmitt-trigger hysteresis for voiced/unvoiced transitions
+            let qualifies_as_voiced = if self.is_voiced {
+                conf >= 0.45 && signal_present
+            } else {
+                conf >= 0.65 && signal_present
+            };
+
+            if qualifies_as_voiced && pitch_opt.is_some() {
+                let raw_f = pitch_opt.unwrap();
+                if raw_f >= 65.0 && raw_f <= 900.0 {
+                    self.is_voiced = true;
+                    self.unvoiced_debounce = 0;
+
+                    // Push to 5-point median filter for outlier rejection
                     self.pitch_history[self.history_idx] = raw_f;
-                    self.history_idx = (self.history_idx + 1) % 3;
-                    if self.history_count < 3 {
+                    self.history_idx = (self.history_idx + 1) % 5;
+                    if self.history_count < 5 {
                         self.history_count += 1;
                     }
 
                     let f_in = if self.history_count >= 3 {
-                        let mut sorted = self.pitch_history;
-                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        sorted[1]
+                        let mut sorted = [0.0; 5];
+                        sorted[..self.history_count].copy_from_slice(&self.pitch_history[..self.history_count]);
+                        sorted[..self.history_count].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        sorted[self.history_count / 2]
                     } else {
                         raw_f
                     };
@@ -153,26 +169,26 @@ impl DspNode for VocalTuner {
                     self.cents_deviation = cents;
                     self.current_note = note_str;
 
+                    // Soft-knee microtuning: if deviation is tiny (< 4 cents) and natural retune,
+                    // apply gentle taper to preserve natural expressive vibrato.
+                    let cents_scale = if self.retune_speed_ms > 8.0 && cents.abs() < 4.0 {
+                        cents.abs() / 4.0
+                    } else {
+                        1.0
+                    };
+
                     // Musical correction ratio (clamped to +/- 2.5 semitones)
                     let ideal_ratio = (f_target / f_in).clamp(0.85, 1.18);
-                    let effective_ratio = 1.0 + (ideal_ratio - 1.0) * self.strength;
+                    let effective_ratio = 1.0 + (ideal_ratio - 1.0) * (self.strength * cents_scale);
 
                     self.shifter.set_ratio(effective_ratio, self.retune_speed_ms);
-                    self.shifter.set_pitch_period(self.sample_rate / f_in);
-                    self.voiced_counter = 0;
-                } else {
-                    self.voiced_counter += 1;
-                    if self.voiced_counter > 4 { // ~10ms unvoiced debounce
-                        self.shifter.set_ratio(1.0, 15.0);
-                        self.current_note = "--";
-                        self.cents_deviation = 0.0;
-                        self.history_count = 0;
-                    }
                 }
             } else {
-                self.voiced_counter += 1;
-                if self.voiced_counter > 4 {
-                    self.shifter.set_ratio(1.0, 15.0);
+                self.unvoiced_debounce += 1;
+                // Debounce unvoiced transitions (~31 ms = 12 hops at 48kHz)
+                if self.unvoiced_debounce > 12 {
+                    self.is_voiced = false;
+                    self.shifter.set_ratio(1.0, 25.0);
                     self.current_note = "--";
                     self.cents_deviation = 0.0;
                     self.history_count = 0;
@@ -180,8 +196,8 @@ impl DspNode for VocalTuner {
             }
         }
 
-        // Continuous delay line processing: clean, bit-perfect passthrough at ratio 1.0,
-        // and artifact-free pitch modification when retuned.
+        // Continuous flat-top delay line processing: transparent passthrough at ratio 1.0,
+        // and artifact-free, comb-free pitch modification when retuned.
         self.shifter.process_sample(input)
     }
 

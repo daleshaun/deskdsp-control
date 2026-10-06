@@ -1,6 +1,7 @@
 //! Real-time Monophonic Time-Domain Pitch Shifter.
-//! Uses pitch-synchronous dual-tap Hann windowed crossfading with 4-point cubic Hermite
-//! interpolation for artifact-free, zero-glitch vocal pitch modification.
+//! Uses flat-top dual-tap grain synthesis with raised-cosine crossfading
+//! and 4-point cubic Hermite interpolation. Eliminates comb filtering
+//! and boundary click artifacts for transparent vocal pitch modification.
 
 #![allow(dead_code)]
 
@@ -11,14 +12,12 @@ pub struct PitchShifter {
     buf_size: usize,
     write_idx: usize,
 
-    // Dual tap delay pointers for smooth windowed crossfading
-    tap1: f32,
-    tap2: f32,
-    window_length: f32,
-    target_window_length: f32,
+    // Master normalized grain phase [0.0, 1.0)
+    phi: f32,
+    grain_len: f32,
     base_delay: f32,
 
-    // Smoothing
+    // Pitch ratio tracking and smoothing
     current_ratio: f32,
     target_ratio: f32,
     smoothing_coeff: f32,
@@ -27,17 +26,16 @@ pub struct PitchShifter {
 impl PitchShifter {
     pub fn new(sample_rate: f32) -> Self {
         let buf_size = 8192;
-        let default_window = (sample_rate * 0.015).clamp(240.0, 960.0); // ~15ms default window
+        // ~25ms optimal grain window for transparent vocal formants
+        let grain_len = (sample_rate * 0.025).clamp(800.0, 1600.0);
         Self {
             sample_rate,
             buffer: vec![0.0; buf_size],
             buf_size,
             write_idx: 0,
-            tap1: 0.0,
-            tap2: default_window * 0.5,
-            window_length: default_window,
-            target_window_length: default_window,
-            base_delay: 512.0, // Constant lookback headroom (~10.6ms at 48kHz)
+            phi: 0.35, // Initialize safely in the single-tap flat region
+            grain_len,
+            base_delay: 512.0, // Fixed lookahead headroom (~10.7ms at 48kHz)
             current_ratio: 1.0,
             target_ratio: 1.0,
             smoothing_coeff: 0.05,
@@ -48,21 +46,19 @@ impl PitchShifter {
         // Clamp pitch shift ratio to musical vocal correction range (+/- 1 octave)
         self.target_ratio = ratio.clamp(0.5, 2.0);
 
-        let speed = retune_speed_ms.max(0.1);
+        let speed = retune_speed_ms.max(0.5);
         self.smoothing_coeff = 1.0 - (-1.0 / (0.001 * speed * self.sample_rate)).exp();
     }
 
-    /// Sets the vocal pitch period in samples for pitch-synchronous grain alignment.
-    pub fn set_pitch_period(&mut self, period_samples: f32) {
-        // Align grain window to ~2 pitch periods (180 to 960 samples, ~3.7ms to 20ms at 48kHz)
-        self.target_window_length = (2.0 * period_samples).clamp(180.0, 960.0);
+    /// Sets the pitch period in samples (kept for API compatibility).
+    pub fn set_pitch_period(&mut self, _period_samples: f32) {
+        // Optimal fixed vocal grain size avoids granular flutter and wrap clicks.
     }
 
     pub fn reset(&mut self) {
         self.buffer.fill(0.0);
         self.write_idx = 0;
-        self.tap1 = 0.0;
-        self.tap2 = self.window_length * 0.5;
+        self.phi = 0.35;
         self.current_ratio = 1.0;
         self.target_ratio = 1.0;
     }
@@ -97,31 +93,63 @@ impl PitchShifter {
         self.buffer[self.write_idx] = input;
         self.write_idx = (self.write_idx + 1) & (self.buf_size - 1);
 
-        // Smooth toward target ratio and grain window size
+        // Exponential smoothing of the pitch ratio
         self.current_ratio += (self.target_ratio - self.current_ratio) * self.smoothing_coeff;
-        self.window_length += (self.target_window_length - self.window_length) * 0.005;
 
-        // Modulation delta: dDelay/dt = 1 - ratio
-        let delay_rate = 1.0 - self.current_ratio;
-        self.tap1 += delay_rate;
-        self.tap2 += delay_rate;
+        // Pitch shift delta: dPhi/dt = (1 - ratio) / grain_len
+        let ratio_dev = 1.0 - self.current_ratio;
+        if ratio_dev.abs() > 0.001 {
+            let d_phi = ratio_dev / self.grain_len;
+            self.phi += d_phi;
+            if self.phi >= 1.0 {
+                self.phi -= 1.0;
+            } else if self.phi < 0.0 {
+                self.phi += 1.0;
+            }
+        } else {
+            // When ratio is 1.0 (on pitch / unvoiced), smoothly guide phi to 0.35
+            // where Tap 1 is 100% active and Tap 2 is 0% active (zero comb filtering).
+            let target_idle_phi = 0.35_f32;
+            self.phi += (target_idle_phi - self.phi) * 0.005;
+        }
 
-        // Wrap taps smoothly within window
-        let w = self.window_length;
-        while self.tap1 >= w { self.tap1 -= w; }
-        while self.tap1 < 0.0 { self.tap1 += w; }
-        while self.tap2 >= w { self.tap2 -= w; }
-        while self.tap2 < 0.0 { self.tap2 += w; }
+        // Tap 1 phase is phi; Tap 2 phase is (phi + 0.5) % 1.0
+        let phi1 = self.phi;
+        let phi2 = if self.phi < 0.5 { self.phi + 0.5 } else { self.phi - 0.5 };
 
-        // Hann crossfade where w1 + w2 == 1.0 identically at EVERY sample
-        // When tap1 wraps, w1 = 0 (silent); when tap2 wraps, w2 = 0 (silent).
-        let fade = (self.tap1 / w) * (2.0 * std::f32::consts::PI);
-        let w1 = 0.5 * (1.0 - fade.cos());
-        let w2 = 1.0 - w1;
+        // Flat-top window with raised-cosine crossfade.
+        // Crossfade zone width = 0.10 (10% of half-cycle)
+        const XFADE_WIDTH: f32 = 0.10;
+        let (w1, w2) = if self.phi < 0.5 {
+            if self.phi < XFADE_WIDTH {
+                let frac = self.phi / XFADE_WIDTH;
+                let s = (frac * std::f32::consts::FRAC_PI_2).sin();
+                (s * s, 1.0 - s * s)
+            } else {
+                (1.0, 0.0)
+            }
+        } else {
+            let psi = self.phi - 0.5;
+            if psi < XFADE_WIDTH {
+                let frac = psi / XFADE_WIDTH;
+                let s = (frac * std::f32::consts::FRAC_PI_2).sin();
+                (1.0 - s * s, s * s)
+            } else {
+                (0.0, 1.0)
+            }
+        };
 
-        let s1 = self.read_cubic(self.base_delay + self.tap1);
-        let s2 = self.read_cubic(self.base_delay + self.tap2);
+        let delay1 = self.base_delay + phi1 * self.grain_len;
+        let delay2 = self.base_delay + phi2 * self.grain_len;
 
-        s1 * w1 + s2 * w2
+        if w1 >= 0.9999 {
+            self.read_cubic(delay1)
+        } else if w2 >= 0.9999 {
+            self.read_cubic(delay2)
+        } else {
+            let s1 = self.read_cubic(delay1);
+            let s2 = self.read_cubic(delay2);
+            s1 * w1 + s2 * w2
+        }
     }
 }

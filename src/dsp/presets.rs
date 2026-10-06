@@ -24,6 +24,7 @@ use super::drive::DriveNode;
 use super::exciter::HarmonicExciter;
 use super::gate::NoiseGate;
 use super::guitar_amp::GuitarAmp;
+use super::mic_image::MicImage;
 use super::rack::MonoRack;
 use super::reverb::ReverbNode;
 use super::saturation::{Saturation, SaturationFlavor};
@@ -312,3 +313,42 @@ pub fn suggested_input(preset: InstrumentPreset) -> (PreampMode, bool) {
         InstrumentPreset::ProgramThru => (PreampMode::Line, false),
     }
 }
+
+/// Builds a Vocal rack with a Tier B True Microphone Image (`MicImage`) loaded at the head.
+/// Allocates and precomputes FFT partitions strictly OFF the audio thread.
+pub fn build_vocal_rack_with_mic_image(ir: &[f32], ir_name: &str, sample_rate: f32) -> MonoRack {
+    let mut rack = MonoRack::with_capacity(16);
+    let partition = if sample_rate > 88200.0 { 256 } else { 128 };
+    let mut mic_node = MicImage::new(ir, partition, ir_name);
+    mic_node.bypassed = false;
+    rack.push(mic_node); // 0: Mic Image (Transfer IR, active)
+
+    let mut hpf = BiquadFilter::new(FilterType::HighPass, 20.0, 0.0, sample_rate);
+    hpf.bypassed = true;
+    rack.push(hpf); // 1: HPF
+
+    let mut gate = NoiseGate::new(sample_rate);
+    gate.bypassed = true;
+    rack.push(gate); // 2: Gate
+
+    let mut deesser = DeEsser::new(sample_rate);
+    deesser.bypassed = true;
+    rack.push(deesser); // 3: De-Esser
+
+    rack.push(ParametricEq4Band::new(sample_rate)); // 4: 4-Band EQ
+
+    let mut comp = VocalCompressor::new(sample_rate);
+    comp.bypassed = true;
+    rack.push(comp); // 5: Compressor
+
+    let mut tuner = VocalTuner::new(sample_rate);
+    tuner.bypassed = true;
+    rack.push(tuner); // 6: Tuner
+
+    let mut sat = Saturation::new(sample_rate);
+    sat.bypassed = true;
+    rack.push(sat); // 7: Saturation
+
+    rack
+}
+
