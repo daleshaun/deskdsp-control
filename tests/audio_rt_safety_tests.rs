@@ -553,7 +553,7 @@ fn test_preset_swap_audio_thread_zero_allocations_and_safe_garbage_return() {
 
 #[test]
 fn test_conv_engine_and_mic_image_zero_allocations() {
-    use deskdsp_control::dsp::{ConvEngine, MicImage};
+    use deskdsp_control::dsp::{build_vocal_rack_with_mic_image, ConvEngine, MicImage};
 
     // Preallocate IR and engine OFF the audio thread
     let ir: Vec<f32> = (0..512).map(|i| (-i as f32 / 100.0).exp()).collect();
@@ -561,15 +561,29 @@ fn test_conv_engine_and_mic_image_zero_allocations() {
     let mut mic = MicImage::new(&ir, 128, "Test Mic");
     mic.set_bypassed(false);
 
-    let mut block = [0.25_f32; 128];
+    let sample_rate = 48000.0_f32;
+    let mut cs1 = ChannelStrip::new(sample_rate);
+    let mut cs2 = ChannelStrip::new(sample_rate);
+    let (mut garbage_prod, _garbage_cons) = rtrb::RingBuffer::<AudioGarbage>::new(32);
+    let vocal_ir_rack = build_vocal_rack_with_mic_image(&ir, "Test Vocal IR", sample_rate);
+    let swap_cmd = AudioCommand::SwapMonoRack {
+        target: CommandTarget::Channel1,
+        rack: Box::new(vocal_ir_rack),
+    };
+    apply_input_command(swap_cmd, &mut garbage_prod, &mut cs1, &mut cs2);
 
-    // PROVE: Convolution processing loop incurs ZERO allocations
+    let mut block = [0.25_f32; 1024];
+
+    // PROVE: Convolution processing loop across multiple partitions incurs ZERO allocations
     assert_no_alloc(|| {
         for s in block.iter_mut() {
             *s = conv.process_sample(*s);
         }
         for s in block.iter_mut() {
             *s = mic.process_sample(*s);
+        }
+        for s in block.iter_mut() {
+            *s = cs1.process(*s);
         }
     });
 }
